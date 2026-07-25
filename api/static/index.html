@@ -4,9 +4,341 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>LotKit</title>
+    <style>
+      :root {
+        color: #1f2933;
+        background: #f5f7fa;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 2rem 1rem;
+      }
+
+      main {
+        width: min(760px, 100%);
+        margin: 0 auto;
+        padding: 2rem;
+        border: 1px solid #d9e2ec;
+        border-radius: 12px;
+        background: white;
+        box-shadow: 0 8px 24px rgb(15 23 42 / 8%);
+      }
+
+      h1,
+      h2 {
+        margin-top: 0;
+      }
+
+      .vin-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 0.75rem;
+        align-items: end;
+      }
+
+      .field {
+        display: grid;
+        gap: 0.35rem;
+      }
+
+      label {
+        font-weight: 600;
+      }
+
+      input,
+      select,
+      button {
+        min-height: 2.75rem;
+        border: 1px solid #9fb3c8;
+        border-radius: 6px;
+        padding: 0.65rem 0.75rem;
+        color: inherit;
+        background: white;
+        font: inherit;
+      }
+
+      input:focus,
+      select:focus {
+        outline: 3px solid rgb(37 99 235 / 18%);
+        border-color: #2563eb;
+      }
+
+      button {
+        border-color: #1d4ed8;
+        background: #2563eb;
+        color: white;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.65;
+        cursor: wait;
+      }
+
+      .error {
+        min-height: 1.5rem;
+        margin: 0.75rem 0 0;
+        color: #b42318;
+        font-weight: 600;
+      }
+
+      .vehicle-form {
+        margin-top: 1.5rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid #d9e2ec;
+      }
+
+      .form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1rem;
+      }
+
+      .full-width {
+        grid-column: 1 / -1;
+      }
+
+      [hidden] {
+        display: none;
+      }
+
+      @media (max-width: 600px) {
+        main {
+          padding: 1.25rem;
+        }
+
+        .vin-row,
+        .form-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .full-width {
+          grid-column: auto;
+        }
+      }
+    </style>
   </head>
   <body>
-    <h1>LotKit</h1>
-    <p>Phase 0 scaffold — VIN tools coming in Phase 1.</p>
+    <main>
+      <h1>LotKit</h1>
+      <p>Decode a VIN, then review and edit the vehicle details.</p>
+
+      <form id="vin-form">
+        <div class="vin-row">
+          <div class="field">
+            <label for="vin">VIN</label>
+            <input
+              id="vin"
+              name="vin"
+              type="text"
+              minlength="17"
+              maxlength="17"
+              autocomplete="off"
+              spellcheck="false"
+              required
+            >
+          </div>
+          <button id="decode-button" type="submit">Decode</button>
+        </div>
+        <p id="error-message" class="error" role="alert" aria-live="polite"></p>
+      </form>
+
+      <form id="vehicle-form" class="vehicle-form" hidden>
+        <h2>Vehicle details</h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="year">Year</label>
+            <input id="year" name="year" type="text" data-state-field="year">
+          </div>
+          <div class="field">
+            <label for="make">Make</label>
+            <input id="make" name="make" type="text" data-state-field="make">
+          </div>
+          <div class="field">
+            <label for="model">Model</label>
+            <input id="model" name="model" type="text" data-state-field="model">
+          </div>
+          <div class="field">
+            <label for="trim">Trim</label>
+            <input id="trim" name="trim" type="text" data-state-field="trim">
+          </div>
+          <div class="field full-width">
+            <label for="engine">Engine</label>
+            <input id="engine" name="engine" type="text" data-state-field="engine">
+          </div>
+          <div class="field">
+            <label for="transmission">Transmission</label>
+            <input
+              id="transmission"
+              name="transmission"
+              type="text"
+              data-state-field="transmission"
+            >
+          </div>
+          <div class="field">
+            <label for="body">Body</label>
+            <input id="body" name="body" type="text" data-state-field="body">
+          </div>
+          <div class="field">
+            <label for="drive">Drive</label>
+            <input id="drive" name="drive" type="text" data-state-field="drive">
+          </div>
+          <div class="field">
+            <label for="doors">Doors</label>
+            <input id="doors" name="doors" type="text" data-state-field="doors">
+          </div>
+          <div class="field">
+            <label for="exterior-colour">Exterior colour</label>
+            <select
+              id="exterior-colour"
+              name="exterior_colour"
+              data-state-field="exterior_colour"
+            >
+              <option value="">Select a colour</option>
+              <option>Black</option>
+              <option>White</option>
+              <option>Silver</option>
+              <option>Gray</option>
+              <option>Red</option>
+              <option>Blue</option>
+              <option>Brown</option>
+              <option>Green</option>
+              <option>Beige</option>
+              <option>Gold</option>
+              <option>Orange</option>
+              <option>Yellow</option>
+              <option>Other</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="interior-colour">Interior colour</label>
+            <select
+              id="interior-colour"
+              name="interior_colour"
+              data-state-field="interior_colour"
+            >
+              <option value="">Select a colour</option>
+              <option>Black</option>
+              <option>White</option>
+              <option>Silver</option>
+              <option>Gray</option>
+              <option>Red</option>
+              <option>Blue</option>
+              <option>Brown</option>
+              <option>Green</option>
+              <option>Beige</option>
+              <option>Gold</option>
+              <option>Orange</option>
+              <option>Yellow</option>
+              <option>Other</option>
+            </select>
+          </div>
+          <div class="field full-width">
+            <label for="price">Price (USD)</label>
+            <input
+              id="price"
+              name="price"
+              type="number"
+              min="0"
+              step="0.01"
+              data-state-field="price"
+            >
+          </div>
+        </div>
+      </form>
+    </main>
+
+    <script>
+      const vinForm = document.querySelector("#vin-form");
+      const vehicleForm = document.querySelector("#vehicle-form");
+      const vinInput = document.querySelector("#vin");
+      const decodeButton = document.querySelector("#decode-button");
+      const errorMessage = document.querySelector("#error-message");
+      const decodedFields = [
+        "year",
+        "make",
+        "model",
+        "trim",
+        "engine",
+        "transmission",
+        "body",
+        "drive",
+        "doors",
+      ];
+      let formState = {};
+
+      function setError(message) {
+        errorMessage.textContent = message;
+      }
+
+      function populateVehicleForm(vehicle) {
+        vehicleForm.reset();
+        formState = {
+          exterior_colour: "",
+          interior_colour: "",
+          price: "",
+        };
+
+        for (const field of decodedFields) {
+          const value = vehicle[field] ?? "";
+          document.querySelector(`#${field}`).value = value;
+          formState[field] = value;
+        }
+
+        vehicleForm.hidden = false;
+      }
+
+      vehicleForm.addEventListener("input", (event) => {
+        const field = event.target.dataset.stateField;
+        if (field) {
+          formState[field] = event.target.value;
+        }
+      });
+
+      vehicleForm.addEventListener("change", (event) => {
+        const field = event.target.dataset.stateField;
+        if (field) {
+          formState[field] = event.target.value;
+        }
+      });
+
+      vinForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        setError("");
+        decodeButton.disabled = true;
+        decodeButton.textContent = "Decoding…";
+
+        try {
+          const response = await fetch("/api/decode", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({vin: vinInput.value}),
+          });
+          const payload = await response.json();
+
+          if (!response.ok) {
+            throw new Error(payload.detail || "The VIN could not be decoded.");
+          }
+
+          vinInput.value = payload.vin;
+          populateVehicleForm(payload.vehicle);
+        } catch (error) {
+          const message = error instanceof Error
+            ? error.message
+            : "The VIN could not be decoded. Please try again.";
+          setError(message);
+        } finally {
+          decodeButton.disabled = false;
+          decodeButton.textContent = "Decode";
+        }
+      });
+    </script>
   </body>
 </html>
