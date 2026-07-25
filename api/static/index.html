@@ -89,7 +89,8 @@
         font-weight: 600;
       }
 
-      .vehicle-form {
+      .vehicle-form,
+      .photos-section {
         margin-top: 1.5rem;
         padding-top: 1.5rem;
         border-top: 1px solid #d9e2ec;
@@ -103,6 +104,102 @@
 
       .full-width {
         grid-column: 1 / -1;
+      }
+
+      .photo-dropzone {
+        padding: 1.25rem;
+        border: 2px dashed #9fb3c8;
+        border-radius: 8px;
+        text-align: center;
+        background: #f8fafc;
+        transition: border-color 120ms ease, background 120ms ease;
+      }
+
+      .photo-dropzone.is-over {
+        border-color: #2563eb;
+        background: #eff6ff;
+      }
+
+      .photo-dropzone p {
+        margin: 0.65rem 0 0;
+        color: #52606d;
+      }
+
+      .photo-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        gap: 0.85rem;
+        margin: 1rem 0;
+      }
+
+      .photo-card {
+        position: relative;
+        overflow: hidden;
+        margin: 0;
+        border: 1px solid #bcccdc;
+        border-radius: 8px;
+        background: white;
+        cursor: grab;
+      }
+
+      .photo-card.dragging {
+        opacity: 0.45;
+        cursor: grabbing;
+      }
+
+      .photo-card img {
+        display: block;
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        object-fit: cover;
+        background: #e4e7eb;
+      }
+
+      .photo-card-name {
+        overflow: hidden;
+        margin: 0;
+        padding: 0.55rem;
+        font-size: 0.8rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .sequence {
+        position: absolute;
+        top: 0.45rem;
+        left: 0.45rem;
+        min-width: 2rem;
+        padding: 0.2rem 0.35rem;
+        border-radius: 999px;
+        color: white;
+        background: rgb(15 23 42 / 85%);
+        text-align: center;
+        font-size: 0.8rem;
+        font-weight: 800;
+      }
+
+      .package-actions {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        flex-wrap: wrap;
+      }
+
+      .package-result {
+        margin-top: 1rem;
+        padding: 1rem;
+        border: 1px solid #a7d7c5;
+        border-radius: 8px;
+        background: #f0fdf4;
+      }
+
+      .package-result p {
+        margin-top: 0;
+      }
+
+      .package-result ol {
+        margin-bottom: 0;
+        padding-left: 1.5rem;
       }
 
       [hidden] {
@@ -253,6 +350,33 @@
           </div>
         </div>
       </form>
+
+      <section id="photos-section" class="photos-section" hidden>
+        <h2>Photos</h2>
+        <div id="photo-dropzone" class="photo-dropzone">
+          <label for="photos">Choose vehicle photos</label>
+          <input
+            id="photos"
+            name="photos"
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            multiple
+          >
+          <p>Or drag JPEG, PNG, or WebP images here.</p>
+        </div>
+        <p id="photo-error" class="error" role="alert" aria-live="polite"></p>
+        <div id="photo-grid" class="photo-grid" aria-live="polite"></div>
+        <div class="package-actions">
+          <button id="package-button" type="button" disabled>Package photos</button>
+          <span id="photo-count"></span>
+        </div>
+        <div id="package-result" class="package-result" hidden>
+          <p id="package-summary"></p>
+          <a id="download-link" href="">Download photo ZIP</a>
+          <p id="skipped-summary"></p>
+          <ol id="packaged-filenames"></ol>
+        </div>
+      </section>
     </main>
 
     <script>
@@ -261,6 +385,18 @@
       const vinInput = document.querySelector("#vin");
       const decodeButton = document.querySelector("#decode-button");
       const errorMessage = document.querySelector("#error-message");
+      const photosSection = document.querySelector("#photos-section");
+      const photosInput = document.querySelector("#photos");
+      const photoDropzone = document.querySelector("#photo-dropzone");
+      const photoGrid = document.querySelector("#photo-grid");
+      const photoError = document.querySelector("#photo-error");
+      const packageButton = document.querySelector("#package-button");
+      const photoCount = document.querySelector("#photo-count");
+      const packageResult = document.querySelector("#package-result");
+      const packageSummary = document.querySelector("#package-summary");
+      const downloadLink = document.querySelector("#download-link");
+      const skippedSummary = document.querySelector("#skipped-summary");
+      const packagedFilenames = document.querySelector("#packaged-filenames");
       const decodedFields = [
         "year",
         "make",
@@ -273,6 +409,9 @@
         "doors",
       ];
       let formState = {};
+      let selectedPhotos = [];
+      let nextPhotoId = 0;
+      let draggedPhotoId = null;
 
       function setError(message) {
         errorMessage.textContent = message;
@@ -293,6 +432,84 @@
         }
 
         vehicleForm.hidden = false;
+        photosSection.hidden = false;
+        setPhotoFiles([]);
+      }
+
+      function setPhotoError(message) {
+        photoError.textContent = message;
+      }
+
+      function updatePhotoStateFromGrid() {
+        const photosById = new Map(
+          selectedPhotos.map((photo) => [photo.id, photo]),
+        );
+        selectedPhotos = Array.from(photoGrid.querySelectorAll(".photo-card"))
+          .map((card) => photosById.get(card.dataset.photoId))
+          .filter(Boolean);
+
+        for (const [index, card] of Array.from(
+          photoGrid.querySelectorAll(".photo-card"),
+        ).entries()) {
+          card.querySelector(".sequence").textContent = String(index + 1)
+            .padStart(2, "0");
+        }
+      }
+
+      function renderPhotoGrid() {
+        photoGrid.replaceChildren();
+
+        for (const [index, photo] of selectedPhotos.entries()) {
+          const card = document.createElement("article");
+          card.className = "photo-card";
+          card.draggable = true;
+          card.dataset.photoId = photo.id;
+
+          const image = document.createElement("img");
+          image.src = photo.previewUrl;
+          image.alt = photo.file.name;
+
+          const sequence = document.createElement("span");
+          sequence.className = "sequence";
+          sequence.textContent = String(index + 1).padStart(2, "0");
+
+          const filename = document.createElement("p");
+          filename.className = "photo-card-name";
+          filename.title = photo.file.name;
+          filename.textContent = photo.file.name;
+
+          card.append(image, sequence, filename);
+          photoGrid.append(card);
+        }
+
+        packageButton.disabled = selectedPhotos.length === 0;
+        photoCount.textContent = selectedPhotos.length
+          ? `${selectedPhotos.length} selected`
+          : "";
+      }
+
+      function setPhotoFiles(files) {
+        for (const photo of selectedPhotos) {
+          URL.revokeObjectURL(photo.previewUrl);
+        }
+
+        const supportedFiles = Array.from(files).filter((file) =>
+          /\.(jpe?g|png|webp)$/i.test(file.name),
+        );
+        if (supportedFiles.length !== files.length) {
+          setPhotoError("Only JPEG, PNG, and WebP images can be packaged.");
+        } else {
+          setPhotoError("");
+        }
+
+        selectedPhotos = supportedFiles.map((file) => ({
+          id: String(++nextPhotoId),
+          file,
+          previewUrl: URL.createObjectURL(file),
+        }));
+        photosInput.value = "";
+        packageResult.hidden = true;
+        renderPhotoGrid();
       }
 
       vehicleForm.addEventListener("input", (event) => {
@@ -306,6 +523,136 @@
         const field = event.target.dataset.stateField;
         if (field) {
           formState[field] = event.target.value;
+        }
+      });
+
+      photosInput.addEventListener("change", () => {
+        setPhotoFiles(photosInput.files);
+      });
+
+      for (const eventName of ["dragenter", "dragover"]) {
+        photoDropzone.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          photoDropzone.classList.add("is-over");
+        });
+      }
+
+      for (const eventName of ["dragleave", "drop"]) {
+        photoDropzone.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          photoDropzone.classList.remove("is-over");
+        });
+      }
+
+      photoDropzone.addEventListener("drop", (event) => {
+        setPhotoFiles(event.dataTransfer.files);
+      });
+
+      photoGrid.addEventListener("dragstart", (event) => {
+        const card = event.target.closest(".photo-card");
+        if (!card) {
+          return;
+        }
+
+        draggedPhotoId = card.dataset.photoId;
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", draggedPhotoId);
+        requestAnimationFrame(() => card.classList.add("dragging"));
+      });
+
+      photoGrid.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        const draggedCard = photoGrid.querySelector(
+          `[data-photo-id="${draggedPhotoId}"]`,
+        );
+        const targetCard = event.target.closest(".photo-card");
+        if (!draggedCard || !targetCard || draggedCard === targetCard) {
+          return;
+        }
+
+        const bounds = targetCard.getBoundingClientRect();
+        const isAfter = event.clientY > bounds.top + bounds.height / 2
+          || (
+            Math.abs(event.clientY - (bounds.top + bounds.height / 2))
+              < bounds.height / 3
+            && event.clientX > bounds.left + bounds.width / 2
+          );
+        photoGrid.insertBefore(
+          draggedCard,
+          isAfter ? targetCard.nextSibling : targetCard,
+        );
+        updatePhotoStateFromGrid();
+      });
+
+      photoGrid.addEventListener("dragend", () => {
+        const draggedCard = photoGrid.querySelector(".dragging");
+        if (draggedCard) {
+          draggedCard.classList.remove("dragging");
+        }
+        draggedPhotoId = null;
+        updatePhotoStateFromGrid();
+      });
+
+      packageButton.addEventListener("click", async () => {
+        setPhotoError("");
+        packageResult.hidden = true;
+        updatePhotoStateFromGrid();
+
+        if (!selectedPhotos.length) {
+          setPhotoError("Choose at least one photo to package.");
+          return;
+        }
+
+        for (const field of vehicleForm.querySelectorAll("[data-state-field]")) {
+          formState[field.dataset.stateField] = field.value;
+        }
+
+        const requestData = new FormData();
+        requestData.append("vin", vinInput.value);
+        requestData.append("vehicle", JSON.stringify(formState));
+        requestData.append(
+          "order",
+          JSON.stringify(selectedPhotos.map((photo) => photo.file.name)),
+        );
+        for (const photo of selectedPhotos) {
+          requestData.append("photos", photo.file, photo.file.name);
+        }
+
+        packageButton.disabled = true;
+        packageButton.textContent = "Packaging…";
+
+        try {
+          const response = await fetch("/api/photos/package", {
+            method: "POST",
+            body: requestData,
+          });
+          const payload = await response.json();
+
+          if (!response.ok) {
+            throw new Error(payload.detail || "The photos could not be packaged.");
+          }
+
+          packageSummary.textContent =
+            `${payload.photo_count} photo${payload.photo_count === 1 ? "" : "s"} packaged.`;
+          downloadLink.href = payload.download_url;
+          skippedSummary.textContent = payload.skipped.length
+            ? `Skipped: ${payload.skipped.join(", ")}`
+            : "";
+          packagedFilenames.replaceChildren();
+          for (const filename of payload.filenames) {
+            const item = document.createElement("li");
+            item.textContent = filename;
+            packagedFilenames.append(item);
+          }
+          packageResult.hidden = false;
+        } catch (error) {
+          const message = error instanceof Error
+            ? error.message
+            : "The photos could not be packaged. Please try again.";
+          setPhotoError(message);
+        } finally {
+          packageButton.disabled = false;
+          packageButton.textContent = "Package photos";
         }
       });
 
