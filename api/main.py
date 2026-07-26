@@ -1,15 +1,17 @@
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from api.decode import VinDecodeError, decode_vin
 from api.photos import build_run
+from api.sticker import build_sticker_pdf
 from api.vin import is_valid_vin, normalize_vin
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -142,6 +144,131 @@ def download_photos(run_id: str):
         zip_file,
         media_type="application/zip",
         filename=zip_file.name,
+    )
+
+
+def _parse_sticker_object(value, field_name: str, required: bool = False):
+    if value is None or value == "":
+        if required:
+            raise ValueError(f"{field_name} is required.")
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{field_name} must be a valid JSON object.") from exc
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError(f"{field_name} must be a valid JSON object.")
+
+
+@app.post("/api/sticker")
+async def create_sticker(request: Request):
+    content_type = request.headers.get("content-type", "").lower()
+    logo_bytes = None
+
+    if content_type.startswith("application/json"):
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError:
+            payload = None
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": "invalid_request",
+                    "detail": "Request body must be a JSON object.",
+                },
+            )
+    elif content_type.startswith(
+        ("multipart/form-data", "application/x-www-form-urlencoded")
+    ):
+        form = await request.form()
+        payload = {
+            "vin": form.get("vin"),
+            "vehicle": form.get("vehicle"),
+            "dealer": form.get("dealer"),
+            "price": form.get("price"),
+            "extras": form.get("extras"),
+        }
+        logo = form.get("logo")
+        if logo is not None and hasattr(logo, "read"):
+            logo_bytes = await logo.read()
+    else:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "invalid_request",
+                "detail": "Use JSON or multipart form data.",
+            },
+        )
+
+    vin_value = payload.get("vin")
+    normalized_vin = normalize_vin(vin_value) if isinstance(vin_value, str) else ""
+    if not is_valid_vin(normalized_vin):
+        return JSONResponse(status_code=422, content={"error": "invalid_vin"})
+
+    try:
+        vehicle_data = _parse_sticker_object(
+            payload.get("vehicle"),
+            "Vehicle",
+            required=True,
+        )
+        dealer_data = _parse_sticker_object(payload.get("dealer"), "Dealer")
+        extras_data = _parse_sticker_object(payload.get("extras"), "Extras")
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"error": "invalid_request", "detail": str(exc)},
+        )
+
+    if logo_bytes:
+        dealer_data = {**dealer_data, "logo_bytes": logo_bytes}
+    price_value = payload.get("price")
+    price = str(price_value).strip() if price_value is not None else None
+
+    pdf_bytes = build_sticker_pdf(
+        normalized_vin,
+        vehicle_data,
+        dealer_data,
+        price,
+        extras_data,
+    )
+    created_utc = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = f"{normalized_vin}_{created_utc}"
+    run_directory = RUNS_ROOT / run_id
+    run_directory.mkdir(parents=True, exist_ok=True)
+    sticker_file = run_directory / f"{normalized_vin}_sticker.pdf"
+    sticker_file.write_bytes(pdf_bytes)
+
+    return {
+        "run_id": run_id,
+        "download_url": f"/api/sticker/download/{run_id}",
+    }
+
+
+@app.get("/api/sticker/download/{run_id}")
+def download_sticker(run_id: str):
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise HTTPException(status_code=404, detail="Window sticker not found.")
+
+    runs_root = RUNS_ROOT.resolve()
+    run_directory = (runs_root / run_id).resolve()
+    if run_directory.parent != runs_root:
+        raise HTTPException(status_code=404, detail="Window sticker not found.")
+
+    vin = run_id[:17]
+    sticker_file = run_directory / f"{vin}_sticker.pdf"
+    if not sticker_file.is_file():
+        raise HTTPException(status_code=404, detail="Window sticker not found.")
+
+    return FileResponse(
+        sticker_file,
+        media_type="application/pdf",
+        filename=sticker_file.name,
+        content_disposition_type="inline",
     )
 
 

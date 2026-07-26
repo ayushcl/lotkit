@@ -106,6 +106,47 @@
         grid-column: 1 / -1;
       }
 
+      .dealer-details {
+        margin: 0.5rem 0 0;
+        padding: 1rem;
+        border: 1px solid #d9e2ec;
+        border-radius: 8px;
+        background: #f8fafc;
+      }
+
+      .dealer-details legend {
+        padding: 0 0.4rem;
+        color: #1f2a44;
+        font-size: 1.05rem;
+        font-weight: 700;
+      }
+
+      .sticker-actions {
+        display: grid;
+        gap: 0.75rem;
+        margin-top: 0.5rem;
+      }
+
+      .sticker-actions button {
+        justify-self: start;
+      }
+
+      .sticker-result {
+        padding: 1rem;
+        border: 1px solid #a7d7c5;
+        border-radius: 8px;
+        background: #f0fdf4;
+      }
+
+      .sticker-preview {
+        width: 100%;
+        height: 640px;
+        margin-top: 1rem;
+        border: 1px solid #bcccdc;
+        border-radius: 6px;
+        background: white;
+      }
+
       .photo-dropzone {
         padding: 1.25rem;
         border: 2px dashed #9fb3c8;
@@ -348,6 +389,65 @@
               data-state-field="price"
             >
           </div>
+          <fieldset class="dealer-details full-width">
+            <legend>Dealer details</legend>
+            <div class="form-grid">
+              <div class="field">
+                <label for="dealer-name">Dealer name</label>
+                <input id="dealer-name" name="dealer_name" type="text">
+              </div>
+              <div class="field">
+                <label for="dealer-phone">Phone</label>
+                <input id="dealer-phone" name="dealer_phone" type="tel">
+              </div>
+              <div class="field full-width">
+                <label for="dealer-address">Address</label>
+                <input id="dealer-address" name="dealer_address" type="text">
+              </div>
+              <div class="field full-width">
+                <label for="dealer-footer">Footer text</label>
+                <input id="dealer-footer" name="dealer_footer" type="text">
+              </div>
+              <div class="field">
+                <label for="stock-number">Stock #</label>
+                <input id="stock-number" name="stock_number" type="text">
+              </div>
+              <div class="field">
+                <label for="mileage">Mileage</label>
+                <input id="mileage" name="mileage" type="number" min="0" step="1">
+              </div>
+              <div class="field full-width">
+                <label for="dealer-logo">Dealer logo</label>
+                <input
+                  id="dealer-logo"
+                  name="logo"
+                  type="file"
+                  accept="image/png,image/jpeg"
+                >
+              </div>
+            </div>
+          </fieldset>
+          <div class="sticker-actions full-width">
+            <button id="sticker-button" type="button">
+              Generate window sticker
+            </button>
+            <p
+              id="sticker-error"
+              class="error"
+              role="alert"
+              aria-live="polite"
+            ></p>
+            <div id="sticker-result" class="sticker-result" hidden>
+              <a id="sticker-download" href="" download>
+                Download window sticker (PDF)
+              </a>
+              <iframe
+                id="sticker-preview"
+                class="sticker-preview"
+                title="Window sticker PDF preview"
+              ></iframe>
+            </div>
+          </div>
         </div>
       </form>
 
@@ -397,6 +497,12 @@
       const downloadLink = document.querySelector("#download-link");
       const skippedSummary = document.querySelector("#skipped-summary");
       const packagedFilenames = document.querySelector("#packaged-filenames");
+      const stickerButton = document.querySelector("#sticker-button");
+      const stickerError = document.querySelector("#sticker-error");
+      const stickerResult = document.querySelector("#sticker-result");
+      const stickerDownload = document.querySelector("#sticker-download");
+      const stickerPreview = document.querySelector("#sticker-preview");
+      const dealerLogo = document.querySelector("#dealer-logo");
       const decodedFields = [
         "year",
         "make",
@@ -433,6 +539,9 @@
 
         vehicleForm.hidden = false;
         photosSection.hidden = false;
+        stickerError.textContent = "";
+        stickerResult.hidden = true;
+        stickerPreview.removeAttribute("src");
         setPhotoFiles([]);
       }
 
@@ -523,6 +632,69 @@
         const field = event.target.dataset.stateField;
         if (field) {
           formState[field] = event.target.value;
+        }
+      });
+
+      stickerButton.addEventListener("click", async () => {
+        stickerError.textContent = "";
+        stickerResult.hidden = true;
+
+        const vehicle = {};
+        for (const field of decodedFields) {
+          vehicle[field] = document.querySelector(`#${field}`).value;
+        }
+
+        const dealer = {
+          name: document.querySelector("#dealer-name").value,
+          address: document.querySelector("#dealer-address").value,
+          phone: document.querySelector("#dealer-phone").value,
+          footer_text: document.querySelector("#dealer-footer").value,
+        };
+        const extras = {
+          stock_number: document.querySelector("#stock-number").value,
+          mileage: document.querySelector("#mileage").value,
+          exterior_colour: document.querySelector("#exterior-colour").value,
+          interior_colour: document.querySelector("#interior-colour").value,
+        };
+
+        const requestData = new FormData();
+        requestData.append("vin", vinInput.value);
+        requestData.append("vehicle", JSON.stringify(vehicle));
+        requestData.append("dealer", JSON.stringify(dealer));
+        requestData.append("price", document.querySelector("#price").value);
+        requestData.append("extras", JSON.stringify(extras));
+        if (dealerLogo.files[0]) {
+          requestData.append("logo", dealerLogo.files[0]);
+        }
+
+        stickerButton.disabled = true;
+        stickerButton.textContent = "Generating…";
+
+        try {
+          const response = await fetch("/api/sticker", {
+            method: "POST",
+            body: requestData,
+          });
+          const payload = await response.json();
+
+          if (!response.ok) {
+            const detail = payload.error === "invalid_vin"
+              ? "Enter a valid 17-character VIN before generating the sticker."
+              : payload.detail;
+            throw new Error(detail || "The window sticker could not be generated.");
+          }
+
+          stickerDownload.href = payload.download_url;
+          stickerPreview.src = payload.download_url;
+          stickerResult.hidden = false;
+        } catch (error) {
+          const message = error instanceof Error
+            ? error.message
+            : "The window sticker could not be generated. Please try again.";
+          stickerError.textContent = message;
+        } finally {
+          stickerButton.disabled = false;
+          stickerButton.textContent = "Generate window sticker";
         }
       });
 
