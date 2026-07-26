@@ -309,7 +309,7 @@ def create_buyers_guide(request: BuyersGuideRequest):
         )
         run_directory = RUNS_ROOT / run_id
         existing_guides = list(
-            run_directory.glob(f"{normalized_vin}_buyers_guide_*.pdf")
+            run_directory.glob(f"DRAFT_buyers_guide_{normalized_vin}_*.pdf")
         )
         if not existing_guides:
             break
@@ -322,7 +322,7 @@ def create_buyers_guide(request: BuyersGuideRequest):
     run_directory.mkdir(parents=True, exist_ok=True)
     buyers_guide_file = (
         run_directory
-        / f"{normalized_vin}_buyers_guide_{request.version}.pdf"
+        / f"DRAFT_buyers_guide_{normalized_vin}_{request.version}.pdf"
     )
     buyers_guide_file.write_bytes(pdf_bytes)
 
@@ -344,7 +344,7 @@ def download_buyers_guide(run_id: str):
 
     vin = run_id[:17]
     buyers_guide_files = [
-        run_directory / f"{vin}_buyers_guide_{version}.pdf"
+        run_directory / f"DRAFT_buyers_guide_{vin}_{version}.pdf"
         for version in ("as_is", "implied_only")
     ]
     available_files = [

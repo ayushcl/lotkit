@@ -40,21 +40,30 @@ def _has_value(field: dict) -> bool:
     return field.get("/V") not in (None, "", "/Off")
 
 
-def _flattened_pdf_is_valid(pdf_bytes: bytes, expected_values: list[str]) -> bool:
+def _flattened_pdf_is_valid(
+    pdf_bytes: bytes,
+    expected_values: list[str],
+    official_back_content: bytes,
+) -> bool:
     reader = PdfReader(BytesIO(pdf_bytes))
-    if len(reader.pages) != 1 or reader.trailer["/Root"].get("/AcroForm"):
+    if len(reader.pages) != 2 or reader.trailer["/Root"].get("/AcroForm"):
         return False
 
     widgets = [
         annotation.get_object()
-        for annotation in reader.pages[0].get("/Annots", [])
+        for page in reader.pages
+        for annotation in page.get("/Annots", [])
         if annotation.get_object().get("/Subtype") == "/Widget"
     ]
     if widgets:
         return False
 
-    page_text = reader.pages[0].extract_text() or ""
-    return all(not value or value in page_text for value in expected_values)
+    front_text = reader.pages[0].extract_text() or ""
+    back_content = reader.pages[1].get_contents().get_data()
+    return (
+        all(not value or value in front_text for value in expected_values)
+        and back_content == official_back_content
+    )
 
 
 def render_buyers_guide(
@@ -75,7 +84,7 @@ def render_buyers_guide(
     writer = PdfWriter()
     writer.append(
         source,
-        pages=[config["page_index"]],
+        pages=[config["page_index"], 2],
         import_outline=False,
     )
 
@@ -132,6 +141,11 @@ def render_buyers_guide(
     writer.write(output)
     pdf_bytes = output.getvalue()
     expected_values = list(values.values())
-    if not _flattened_pdf_is_valid(pdf_bytes, expected_values):
+    official_back_content = source.pages[2].get_contents().get_data()
+    if not _flattened_pdf_is_valid(
+        pdf_bytes,
+        expected_values,
+        official_back_content,
+    ):
         raise ValueError("Generated Buyers Guide could not be flattened safely.")
     return pdf_bytes

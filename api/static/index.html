@@ -155,6 +155,27 @@
         line-height: 1.4;
       }
 
+      .draft-warning {
+        margin: 0.25rem 0 0;
+        padding: 0.75rem;
+        border: 1px solid #fdba74;
+        border-radius: 6px;
+        color: #9a3412;
+        background: #fff7ed;
+        font-weight: 700;
+        line-height: 1.4;
+      }
+
+      .sticker-result .draft-warning {
+        margin-top: 0;
+      }
+
+      .print-guidance {
+        color: #52606d;
+        font-size: 0.9rem;
+        line-height: 1.4;
+      }
+
       .photo-dropzone {
         padding: 1.25rem;
         border: 2px dashed #9fb3c8;
@@ -479,6 +500,7 @@
             </option>
           </select>
           <p class="disclaimer">You select which form your dealer requires. LotKit fills vehicle info only (make, model, year, VIN). Complete all warranty sections per your dealer's instructions.</p>
+          <p class="draft-warning">Draft — dealer completion required. LotKit populates vehicle information only. The dealership must complete all applicable warranty and dealer-contact fields before display.</p>
         </div>
         <div class="sticker-actions">
           <button id="buyers-guide-button" type="button" disabled>
@@ -491,8 +513,10 @@
             aria-live="polite"
           ></p>
           <div id="buyers-guide-result" class="sticker-result" hidden>
+            <p class="draft-warning">Draft — dealer completion required. LotKit populates vehicle information only. The dealership must complete all applicable warranty and dealer-contact fields before display.</p>
+            <p class="print-guidance">Print double-sided at actual size (100%) in black ink on white paper. Both sides must remain readily visible.</p>
             <a id="buyers-guide-download" href="" download>
-              Download Buyers Guide (PDF)
+              Download DRAFT Buyers Guide (PDF)
             </a>
             <iframe
               id="buyers-guide-preview"
