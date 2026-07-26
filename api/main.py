@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from api.buyers_guide import render_buyers_guide
 from api.decode import VinDecodeError, decode_vin
 from api.photos import build_run
 from api.sticker import build_sticker_pdf
@@ -26,6 +27,14 @@ app = FastAPI()
 
 class VinRequest(BaseModel):
     vin: str
+
+
+class BuyersGuideRequest(BaseModel):
+    vin: str = ""
+    make: str = ""
+    model: str = ""
+    year: str = ""
+    version: str | None = None
 
 
 @app.get("/health")
@@ -268,6 +277,89 @@ def download_sticker(run_id: str):
         sticker_file,
         media_type="application/pdf",
         filename=sticker_file.name,
+        content_disposition_type="inline",
+    )
+
+
+@app.post("/api/buyers-guide")
+def create_buyers_guide(request: BuyersGuideRequest):
+    normalized_vin = normalize_vin(request.vin)
+    if not is_valid_vin(normalized_vin):
+        return JSONResponse(status_code=422, content={"error": "invalid_vin"})
+
+    if request.version not in {"as_is", "implied_only"}:
+        return JSONResponse(
+            status_code=422,
+            content={"error": "version_required"},
+        )
+
+    pdf_bytes = render_buyers_guide(
+        normalized_vin,
+        request.make,
+        request.model,
+        request.year,
+        request.version,
+    )
+
+    created_utc = datetime.now(timezone.utc)
+    for seconds_to_add in range(60):
+        run_id = (
+            f"{normalized_vin}_"
+            f"{(created_utc + timedelta(seconds=seconds_to_add)):%Y%m%dT%H%M%SZ}"
+        )
+        run_directory = RUNS_ROOT / run_id
+        existing_guides = list(
+            run_directory.glob(f"{normalized_vin}_buyers_guide_*.pdf")
+        )
+        if not existing_guides:
+            break
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not allocate a Buyers Guide run.",
+        )
+
+    run_directory.mkdir(parents=True, exist_ok=True)
+    buyers_guide_file = (
+        run_directory
+        / f"{normalized_vin}_buyers_guide_{request.version}.pdf"
+    )
+    buyers_guide_file.write_bytes(pdf_bytes)
+
+    return {
+        "run_id": run_id,
+        "download_url": f"/api/buyers-guide/download/{run_id}",
+    }
+
+
+@app.get("/api/buyers-guide/download/{run_id}")
+def download_buyers_guide(run_id: str):
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise HTTPException(status_code=404, detail="Buyers Guide not found.")
+
+    runs_root = RUNS_ROOT.resolve()
+    run_directory = (runs_root / run_id).resolve()
+    if run_directory.parent != runs_root:
+        raise HTTPException(status_code=404, detail="Buyers Guide not found.")
+
+    vin = run_id[:17]
+    buyers_guide_files = [
+        run_directory / f"{vin}_buyers_guide_{version}.pdf"
+        for version in ("as_is", "implied_only")
+    ]
+    available_files = [
+        buyers_guide_file
+        for buyers_guide_file in buyers_guide_files
+        if buyers_guide_file.is_file()
+    ]
+    if len(available_files) != 1:
+        raise HTTPException(status_code=404, detail="Buyers Guide not found.")
+
+    buyers_guide_file = available_files[0]
+    return FileResponse(
+        buyers_guide_file,
+        media_type="application/pdf",
+        filename=buyers_guide_file.name,
         content_disposition_type="inline",
     )
 

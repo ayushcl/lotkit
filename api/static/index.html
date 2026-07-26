@@ -90,7 +90,8 @@
       }
 
       .vehicle-form,
-      .photos-section {
+      .photos-section,
+      .buyers-guide-section {
         margin-top: 1.5rem;
         padding-top: 1.5rem;
         border-top: 1px solid #d9e2ec;
@@ -145,6 +146,13 @@
         border: 1px solid #bcccdc;
         border-radius: 6px;
         background: white;
+      }
+
+      .disclaimer {
+        margin: 0;
+        color: #667085;
+        font-size: 0.85rem;
+        line-height: 1.4;
       }
 
       .photo-dropzone {
@@ -451,6 +459,50 @@
         </div>
       </form>
 
+      <section
+        id="buyers-guide-section"
+        class="buyers-guide-section"
+        hidden
+      >
+        <h2>FTC Buyers Guide</h2>
+        <div class="field">
+          <label for="buyers-guide-version">
+            Choose Buyers Guide form to render
+          </label>
+          <select id="buyers-guide-version" required>
+            <option value="" selected disabled>Choose a form</option>
+            <option value="as_is">
+              "As Is" form (AS IS - NO DEALER WARRANTY)
+            </option>
+            <option value="implied_only">
+              "Implied Warranties Only" form (for states that require it)
+            </option>
+          </select>
+          <p class="disclaimer">You select which form your dealer requires. LotKit fills vehicle info only (make, model, year, VIN). Complete all warranty sections per your dealer's instructions.</p>
+        </div>
+        <div class="sticker-actions">
+          <button id="buyers-guide-button" type="button" disabled>
+            Generate Buyers Guide
+          </button>
+          <p
+            id="buyers-guide-error"
+            class="error"
+            role="alert"
+            aria-live="polite"
+          ></p>
+          <div id="buyers-guide-result" class="sticker-result" hidden>
+            <a id="buyers-guide-download" href="" download>
+              Download Buyers Guide (PDF)
+            </a>
+            <iframe
+              id="buyers-guide-preview"
+              class="sticker-preview"
+              title="FTC Buyers Guide PDF preview"
+            ></iframe>
+          </div>
+        </div>
+      </section>
+
       <section id="photos-section" class="photos-section" hidden>
         <h2>Photos</h2>
         <div id="photo-dropzone" class="photo-dropzone">
@@ -503,6 +555,27 @@
       const stickerDownload = document.querySelector("#sticker-download");
       const stickerPreview = document.querySelector("#sticker-preview");
       const dealerLogo = document.querySelector("#dealer-logo");
+      const buyersGuideSection = document.querySelector(
+        "#buyers-guide-section",
+      );
+      const buyersGuideVersion = document.querySelector(
+        "#buyers-guide-version",
+      );
+      const buyersGuideButton = document.querySelector(
+        "#buyers-guide-button",
+      );
+      const buyersGuideError = document.querySelector(
+        "#buyers-guide-error",
+      );
+      const buyersGuideResult = document.querySelector(
+        "#buyers-guide-result",
+      );
+      const buyersGuideDownload = document.querySelector(
+        "#buyers-guide-download",
+      );
+      const buyersGuidePreview = document.querySelector(
+        "#buyers-guide-preview",
+      );
       const decodedFields = [
         "year",
         "make",
@@ -539,9 +612,15 @@
 
         vehicleForm.hidden = false;
         photosSection.hidden = false;
+        buyersGuideSection.hidden = false;
         stickerError.textContent = "";
         stickerResult.hidden = true;
         stickerPreview.removeAttribute("src");
+        buyersGuideVersion.value = "";
+        buyersGuideButton.disabled = true;
+        buyersGuideError.textContent = "";
+        buyersGuideResult.hidden = true;
+        buyersGuidePreview.removeAttribute("src");
         setPhotoFiles([]);
       }
 
@@ -695,6 +774,64 @@
         } finally {
           stickerButton.disabled = false;
           stickerButton.textContent = "Generate window sticker";
+        }
+      });
+
+      buyersGuideVersion.addEventListener("change", () => {
+        buyersGuideButton.disabled = !buyersGuideVersion.value;
+        buyersGuideError.textContent = "";
+        buyersGuideResult.hidden = true;
+        buyersGuidePreview.removeAttribute("src");
+      });
+
+      buyersGuideButton.addEventListener("click", async () => {
+        buyersGuideError.textContent = "";
+        buyersGuideResult.hidden = true;
+
+        if (!buyersGuideVersion.value) {
+          buyersGuideError.textContent =
+            "Choose the Buyers Guide form your dealer requires.";
+          return;
+        }
+
+        buyersGuideButton.disabled = true;
+        buyersGuideButton.textContent = "Generating…";
+
+        try {
+          const response = await fetch("/api/buyers-guide", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              vin: vinInput.value,
+              make: document.querySelector("#make").value,
+              model: document.querySelector("#model").value,
+              year: document.querySelector("#year").value,
+              version: buyersGuideVersion.value,
+            }),
+          });
+          const payload = await response.json();
+
+          if (!response.ok) {
+            const detail = payload.error === "invalid_vin"
+              ? "Enter a valid 17-character VIN before generating the Buyers Guide."
+              : payload.error === "version_required"
+                ? "Choose the Buyers Guide form your dealer requires."
+                : payload.detail;
+            throw new Error(
+              detail || "The Buyers Guide could not be generated.",
+            );
+          }
+
+          buyersGuideDownload.href = payload.download_url;
+          buyersGuidePreview.src = payload.download_url;
+          buyersGuideResult.hidden = false;
+        } catch (error) {
+          buyersGuideError.textContent = error instanceof Error
+            ? error.message
+            : "The Buyers Guide could not be generated. Please try again.";
+        } finally {
+          buyersGuideButton.disabled = !buyersGuideVersion.value;
+          buyersGuideButton.textContent = "Generate Buyers Guide";
         }
       });
 
