@@ -1,8 +1,9 @@
 import json
-import re
+import shutil
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import (
@@ -11,10 +12,11 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -35,13 +37,31 @@ from api.dealerships import (
     validate_logo,
 )
 from api.photos import build_run
+from api.runs import (
+    UNSET,
+    DealershipNotFoundError,
+    InvalidRunDataError,
+    RunConflictError,
+    RunNotFoundError,
+    RunStatusConflictError,
+    RunTarget,
+    discard_run,
+    export_runs_csv,
+    get_run_detail,
+    list_runs,
+    mark_run_ready,
+    prepare_run_target,
+    record_successful_output,
+    resolve_artifact_path,
+    safe_run_directory,
+    snapshot_dealership,
+)
 from api.sticker import build_sticker_pdf
 from api.vin import is_valid_vin, normalize_vin
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 RUNS_ROOT = BASE_DIR / "runs"
-RUN_ID_PATTERN = re.compile(r"^[A-HJ-NPR-Z0-9]{17}_\d{8}T\d{6}Z$")
 
 load_dotenv(BASE_DIR / ".env")
 
@@ -70,11 +90,203 @@ class BuyersGuideRequest(BaseModel):
     model: str = ""
     year: str = ""
     version: str | None = None
+    run_id: str | None = None
+    dealership_id: int | None = None
+    vehicle: dict[str, Any] | None = None
+    price: str | None = None
+    exterior_colour: str | None = None
+    interior_colour: str | None = None
 
 
 @app.get("/health")
 def health() -> dict[str, bool | str]:
     return {"ok": True, "service": "lotkit"}
+
+
+def _parse_optional_dealership_id(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        raise ValueError("Dealership profile is invalid or not owned.")
+    try:
+        dealership_id = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Dealership profile is invalid or not owned."
+        ) from exc
+    if dealership_id <= 0:
+        raise ValueError("Dealership profile is invalid or not owned.")
+    return dealership_id
+
+
+def _normalize_requested_run_id(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidRunDataError("Run ID must be a UUID4 string.")
+    return value.strip()
+
+
+def _run_text_value(values: dict[str, Any], key: str) -> str | object:
+    if key not in values:
+        return UNSET
+    value = values[key]
+    return "" if value is None else str(value).strip()
+
+
+def _run_error_response(exc: Exception) -> JSONResponse:
+    if isinstance(exc, RunNotFoundError):
+        return JSONResponse(
+            status_code=404,
+            content={"error": "run_not_found", "detail": str(exc)},
+        )
+    if isinstance(exc, RunStatusConflictError):
+        return JSONResponse(
+            status_code=409,
+            content={"error": "run_status_conflict", "detail": str(exc)},
+        )
+    if isinstance(exc, RunConflictError):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "run_mismatch",
+                "detail": (
+                    "This Run belongs to a different vehicle or dealership."
+                ),
+            },
+        )
+    if isinstance(exc, DealershipNotFoundError) or (
+        isinstance(exc, ValueError)
+        and not isinstance(exc, InvalidRunDataError)
+    ):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "invalid_dealership",
+                "detail": "Dealership profile is invalid or not owned.",
+            },
+        )
+    return JSONResponse(
+        status_code=422,
+        content={"error": "invalid_run", "detail": str(exc)},
+    )
+
+
+def _prepare_output_run(
+    owner_id: int,
+    vin: str,
+    dealership_id: int | None,
+    requested_run_id: str | None,
+) -> tuple[RunTarget, dict[str, Any]]:
+    connection = connect_db()
+    try:
+        target = prepare_run_target(
+            connection,
+            owner_id,
+            vin,
+            dealership_id,
+            requested_run_id,
+        )
+        dealership_snapshot = snapshot_dealership(
+            connection,
+            owner_id,
+            dealership_id,
+        )
+        return target, dealership_snapshot
+    finally:
+        connection.close()
+
+
+def _record_output(
+    owner_id: int,
+    target: RunTarget,
+    *,
+    vin: str,
+    dealership_id: int | None,
+    output_updates: dict[str, str],
+    vehicle: dict[str, Any] | None | object = UNSET,
+    price: str | None | object = UNSET,
+    exterior_colour: str | None | object = UNSET,
+    interior_colour: str | None | object = UNSET,
+    photo_order: list[str] | None | object = UNSET,
+    dealership_snapshot: dict[str, Any] | None | object = UNSET,
+) -> dict[str, Any]:
+    connection = connect_db()
+    try:
+        return record_successful_output(
+            connection,
+            owner_id,
+            target,
+            vin=vin,
+            dealership_id=dealership_id,
+            output_updates=output_updates,
+            vehicle=vehicle,
+            price=price,
+            exterior_colour=exterior_colour,
+            interior_colour=interior_colour,
+            photo_order=photo_order,
+            dealership_snapshot=dealership_snapshot,
+        )
+    finally:
+        connection.close()
+
+
+def _write_run_file(target: RunTarget, filename: str, content: bytes) -> Path:
+    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+    run_directory = safe_run_directory(target.run_id, RUNS_ROOT)
+    run_directory.mkdir(parents=False, exist_ok=not target.is_new)
+    destination = (run_directory / filename).resolve()
+    if destination.parent != run_directory:
+        raise InvalidRunDataError("Unsafe artifact filename.")
+    destination.write_bytes(content)
+    return destination
+
+
+def _remove_new_run_folder(target: RunTarget) -> None:
+    if not target.is_new:
+        return
+    try:
+        directory = safe_run_directory(target.run_id, RUNS_ROOT)
+    except InvalidRunDataError:
+        return
+    if directory.is_dir():
+        shutil.rmtree(directory)
+
+
+def _artifact_response(
+    owner_id: int,
+    run_id: str,
+    artifact_type: str,
+) -> FileResponse:
+    connection = connect_db()
+    try:
+        artifact = resolve_artifact_path(
+            connection,
+            owner_id,
+            run_id,
+            artifact_type,
+            RUNS_ROOT,
+        )
+    finally:
+        connection.close()
+
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Run artifact not found.")
+
+    media_types = {
+        "photos_zip": "application/zip",
+        "sticker_pdf": "application/pdf",
+        "buyers_guide_pdf": "application/pdf",
+    }
+    return FileResponse(
+        artifact,
+        media_type=media_types[artifact_type],
+        filename=artifact.name,
+        headers={"X-LotKit-Run-ID": run_id},
+        content_disposition_type=(
+            "attachment" if artifact_type == "photos_zip" else "inline"
+        ),
+    )
 
 
 def _dealership_values(
@@ -300,6 +512,9 @@ async def package_photos(
     vehicle: str = Form(...),
     order: str = Form(...),
     photos: list[UploadFile] = File(...),
+    run_id: str | None = Form(None),
+    dealership_id: str | None = Form(None),
+    owner_id: int = Depends(current_owner_id),
 ):
     normalized_vin = normalize_vin(vin)
     if not is_valid_vin(normalized_vin):
@@ -339,6 +554,24 @@ async def package_photos(
             },
         )
 
+    try:
+        parsed_dealership_id = _parse_optional_dealership_id(dealership_id)
+        requested_run_id = _normalize_requested_run_id(run_id)
+        target, dealership_snapshot = _prepare_output_run(
+            owner_id,
+            normalized_vin,
+            parsed_dealership_id,
+            requested_run_id,
+        )
+    except (
+        DealershipNotFoundError,
+        InvalidRunDataError,
+        RunConflictError,
+        RunNotFoundError,
+        ValueError,
+    ) as exc:
+        return _run_error_response(exc)
+
     uploaded_files = [
         (photo.filename or "unnamed", await photo.read()) for photo in photos
     ]
@@ -351,38 +584,75 @@ async def package_photos(
                 break
     ordered_files.extend(remaining)
 
-    summary = build_run(
-        normalized_vin,
-        vehicle_data,
-        ordered_files,
-        str(RUNS_ROOT),
+    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        with TemporaryDirectory(
+            prefix=f".{target.run_id}-photos-",
+            dir=RUNS_ROOT,
+        ) as staging_root:
+            summary = build_run(
+                normalized_vin,
+                vehicle_data,
+                ordered_files,
+                staging_root,
+            )
+            staged_directory = Path(staging_root) / summary["run_id"]
+            run_directory = safe_run_directory(target.run_id, RUNS_ROOT)
+            if target.is_new:
+                if run_directory.exists():
+                    raise FileExistsError("Run storage already exists.")
+                staged_directory.replace(run_directory)
+            else:
+                run_directory.mkdir(parents=False, exist_ok=True)
+                for staged_file in staged_directory.iterdir():
+                    staged_file.replace(run_directory / staged_file.name)
+
+        zip_filename = f"{normalized_vin}_photos.zip"
+        _record_output(
+            owner_id,
+            target,
+            vin=normalized_vin,
+            dealership_id=parsed_dealership_id,
+            output_updates={"photos_zip": zip_filename},
+            vehicle=vehicle_data,
+            price=_run_text_value(vehicle_data, "price"),
+            exterior_colour=_run_text_value(
+                vehicle_data,
+                "exterior_colour",
+            ),
+            interior_colour=_run_text_value(
+                vehicle_data,
+                "interior_colour",
+            ),
+            photo_order=summary["filenames"],
+            dealership_snapshot=(
+                dealership_snapshot
+                if parsed_dealership_id is not None
+                else UNSET
+            ),
+        )
+    except Exception:
+        _remove_new_run_folder(target)
+        raise
+
+    return JSONResponse(
+        content={
+            **summary,
+            "run_id": target.run_id,
+            "zip_path": f"{target.run_id}/{zip_filename}",
+            "report_path": f"{target.run_id}/run_report.json",
+            "download_url": f"/api/photos/download/{target.run_id}",
+        },
+        headers={"X-LotKit-Run-ID": target.run_id},
     )
-    return {
-        **summary,
-        "download_url": f"/api/photos/download/{summary['run_id']}",
-    }
 
 
 @app.get("/api/photos/download/{run_id}")
-def download_photos(run_id: str):
-    if not RUN_ID_PATTERN.fullmatch(run_id):
-        raise HTTPException(status_code=404, detail="Photo package not found.")
-
-    runs_root = RUNS_ROOT.resolve()
-    run_directory = (runs_root / run_id).resolve()
-    if run_directory.parent != runs_root:
-        raise HTTPException(status_code=404, detail="Photo package not found.")
-
-    vin = run_id[:17]
-    zip_file = run_directory / f"{vin}_photos.zip"
-    if not zip_file.is_file():
-        raise HTTPException(status_code=404, detail="Photo package not found.")
-
-    return FileResponse(
-        zip_file,
-        media_type="application/zip",
-        filename=zip_file.name,
-    )
+def download_photos(
+    run_id: str,
+    owner_id: int = Depends(current_owner_id),
+):
+    return _artifact_response(owner_id, run_id, "photos_zip")
 
 
 def _parse_sticker_object(value, field_name: str, required: bool = False):
@@ -434,6 +704,7 @@ async def create_sticker(
             "price": form.get("price"),
             "extras": form.get("extras"),
             "dealership_id": form.get("dealership_id"),
+            "run_id": form.get("run_id"),
         }
         logo = form.get("logo")
         if logo is not None and hasattr(logo, "read"):
@@ -466,23 +737,28 @@ async def create_sticker(
             content={"error": "invalid_request", "detail": str(exc)},
         )
 
-    dealership_id_value = payload.get("dealership_id")
-    if dealership_id_value not in (None, ""):
-        try:
-            if isinstance(dealership_id_value, bool):
-                raise ValueError
-            dealership_id = int(dealership_id_value)
-            if dealership_id <= 0:
-                raise ValueError
-        except (TypeError, ValueError):
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "error": "invalid_dealership",
-                    "detail": "Dealership profile is invalid or not owned.",
-                },
-            )
+    try:
+        dealership_id = _parse_optional_dealership_id(
+            payload.get("dealership_id")
+        )
+        requested_run_id = _normalize_requested_run_id(payload.get("run_id"))
+        target, dealership_snapshot = _prepare_output_run(
+            owner_id,
+            normalized_vin,
+            dealership_id,
+            requested_run_id,
+        )
+    except (
+        DealershipNotFoundError,
+        InvalidRunDataError,
+        RunConflictError,
+        RunNotFoundError,
+        ValueError,
+    ) as exc:
+        return _run_error_response(exc)
 
+    inline_logo_supplied = logo_bytes is not None
+    if dealership_id is not None:
         connection = connect_db()
         try:
             profile = get_profile_row(connection, owner_id, dealership_id)
@@ -510,6 +786,24 @@ async def create_sticker(
             if profile_logo is not None and profile_logo.is_file():
                 logo_bytes = profile_logo.read_bytes()
 
+    effective_snapshot: dict[str, Any] | object = UNSET
+    has_inline_branding = any(
+        str(dealer_data.get(field) or "").strip()
+        for field in ("name", "address", "phone", "footer_text")
+    )
+    if dealership_id is not None or has_inline_branding:
+        effective_snapshot = {
+            **dealership_snapshot,
+            "dealership_name": str(dealer_data.get("name") or "").strip(),
+            "address": str(dealer_data.get("address") or "").strip(),
+            "phone": str(dealer_data.get("phone") or "").strip(),
+            "sticker_footer_text": str(
+                dealer_data.get("footer_text") or ""
+            ).strip(),
+        }
+        if inline_logo_supplied:
+            effective_snapshot["logo_path"] = None
+
     if logo_bytes:
         dealer_data = {**dealer_data, "logo_bytes": logo_bytes}
     price_value = payload.get("price")
@@ -522,44 +816,53 @@ async def create_sticker(
         price,
         extras_data,
     )
-    created_utc = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_id = f"{normalized_vin}_{created_utc}"
-    run_directory = RUNS_ROOT / run_id
-    run_directory.mkdir(parents=True, exist_ok=True)
-    sticker_file = run_directory / f"{normalized_vin}_sticker.pdf"
-    sticker_file.write_bytes(pdf_bytes)
+    sticker_filename = f"{normalized_vin}_sticker.pdf"
+    try:
+        _write_run_file(target, sticker_filename, pdf_bytes)
+        _record_output(
+            owner_id,
+            target,
+            vin=normalized_vin,
+            dealership_id=dealership_id,
+            output_updates={"sticker_pdf": sticker_filename},
+            vehicle=vehicle_data,
+            price=_run_text_value(payload, "price"),
+            exterior_colour=_run_text_value(
+                extras_data,
+                "exterior_colour",
+            ),
+            interior_colour=_run_text_value(
+                extras_data,
+                "interior_colour",
+            ),
+            dealership_snapshot=effective_snapshot,
+        )
+    except Exception:
+        _remove_new_run_folder(target)
+        raise
 
-    return {
-        "run_id": run_id,
-        "download_url": f"/api/sticker/download/{run_id}",
-    }
-
-
-@app.get("/api/sticker/download/{run_id}")
-def download_sticker(run_id: str):
-    if not RUN_ID_PATTERN.fullmatch(run_id):
-        raise HTTPException(status_code=404, detail="Window sticker not found.")
-
-    runs_root = RUNS_ROOT.resolve()
-    run_directory = (runs_root / run_id).resolve()
-    if run_directory.parent != runs_root:
-        raise HTTPException(status_code=404, detail="Window sticker not found.")
-
-    vin = run_id[:17]
-    sticker_file = run_directory / f"{vin}_sticker.pdf"
-    if not sticker_file.is_file():
-        raise HTTPException(status_code=404, detail="Window sticker not found.")
-
-    return FileResponse(
-        sticker_file,
-        media_type="application/pdf",
-        filename=sticker_file.name,
-        content_disposition_type="inline",
+    return JSONResponse(
+        content={
+            "run_id": target.run_id,
+            "download_url": f"/api/sticker/download/{target.run_id}",
+        },
+        headers={"X-LotKit-Run-ID": target.run_id},
     )
 
 
+@app.get("/api/sticker/download/{run_id}")
+def download_sticker(
+    run_id: str,
+    owner_id: int = Depends(current_owner_id),
+):
+    return _artifact_response(owner_id, run_id, "sticker_pdf")
+
+
 @app.post("/api/buyers-guide")
-def create_buyers_guide(request: BuyersGuideRequest):
+def create_buyers_guide(
+    request: BuyersGuideRequest,
+    owner_id: int = Depends(current_owner_id),
+):
     normalized_vin = normalize_vin(request.vin)
     if not is_valid_vin(normalized_vin):
         return JSONResponse(status_code=422, content={"error": "invalid_vin"})
@@ -570,6 +873,26 @@ def create_buyers_guide(request: BuyersGuideRequest):
             content={"error": "version_required"},
         )
 
+    try:
+        dealership_id = _parse_optional_dealership_id(
+            request.dealership_id
+        )
+        requested_run_id = _normalize_requested_run_id(request.run_id)
+        target, dealership_snapshot = _prepare_output_run(
+            owner_id,
+            normalized_vin,
+            dealership_id,
+            requested_run_id,
+        )
+    except (
+        DealershipNotFoundError,
+        InvalidRunDataError,
+        RunConflictError,
+        RunNotFoundError,
+        ValueError,
+    ) as exc:
+        return _run_error_response(exc)
+
     pdf_bytes = render_buyers_guide(
         normalized_vin,
         request.make,
@@ -578,67 +901,198 @@ def create_buyers_guide(request: BuyersGuideRequest):
         request.version,
     )
 
-    created_utc = datetime.now(timezone.utc)
-    for seconds_to_add in range(60):
-        run_id = (
-            f"{normalized_vin}_"
-            f"{(created_utc + timedelta(seconds=seconds_to_add)):%Y%m%dT%H%M%SZ}"
-        )
-        run_directory = RUNS_ROOT / run_id
-        existing_guides = list(
-            run_directory.glob(f"DRAFT_buyers_guide_{normalized_vin}_*.pdf")
-        )
-        if not existing_guides:
-            break
-    else:
-        raise HTTPException(
-            status_code=500,
-            detail="Could not allocate a Buyers Guide run.",
-        )
-
-    run_directory.mkdir(parents=True, exist_ok=True)
-    buyers_guide_file = (
-        run_directory
-        / f"DRAFT_buyers_guide_{normalized_vin}_{request.version}.pdf"
+    buyers_guide_filename = (
+        f"DRAFT_buyers_guide_{normalized_vin}_{request.version}.pdf"
     )
-    buyers_guide_file.write_bytes(pdf_bytes)
-
-    return {
-        "run_id": run_id,
-        "download_url": f"/api/buyers-guide/download/{run_id}",
+    vehicle_snapshot = {
+        **(request.vehicle or {}),
+        "year": request.year,
+        "make": request.make,
+        "model": request.model,
     }
+    try:
+        _write_run_file(target, buyers_guide_filename, pdf_bytes)
+        _record_output(
+            owner_id,
+            target,
+            vin=normalized_vin,
+            dealership_id=dealership_id,
+            output_updates={
+                "buyers_guide_pdf": buyers_guide_filename,
+                "buyers_guide_version": request.version,
+            },
+            vehicle=vehicle_snapshot,
+            price=request.price if request.price is not None else UNSET,
+            exterior_colour=(
+                request.exterior_colour
+                if request.exterior_colour is not None
+                else UNSET
+            ),
+            interior_colour=(
+                request.interior_colour
+                if request.interior_colour is not None
+                else UNSET
+            ),
+            dealership_snapshot=(
+                dealership_snapshot if dealership_id is not None else UNSET
+            ),
+        )
+    except Exception:
+        _remove_new_run_folder(target)
+        raise
+
+    return JSONResponse(
+        content={
+            "run_id": target.run_id,
+            "download_url": f"/api/buyers-guide/download/{target.run_id}",
+        },
+        headers={"X-LotKit-Run-ID": target.run_id},
+    )
 
 
 @app.get("/api/buyers-guide/download/{run_id}")
-def download_buyers_guide(run_id: str):
-    if not RUN_ID_PATTERN.fullmatch(run_id):
-        raise HTTPException(status_code=404, detail="Buyers Guide not found.")
+def download_buyers_guide(
+    run_id: str,
+    owner_id: int = Depends(current_owner_id),
+):
+    return _artifact_response(owner_id, run_id, "buyers_guide_pdf")
 
-    runs_root = RUNS_ROOT.resolve()
-    run_directory = (runs_root / run_id).resolve()
-    if run_directory.parent != runs_root:
-        raise HTTPException(status_code=404, detail="Buyers Guide not found.")
 
-    vin = run_id[:17]
-    buyers_guide_files = [
-        run_directory / f"DRAFT_buyers_guide_{vin}_{version}.pdf"
-        for version in ("as_is", "implied_only")
-    ]
-    available_files = [
-        buyers_guide_file
-        for buyers_guide_file in buyers_guide_files
-        if buyers_guide_file.is_file()
-    ]
-    if len(available_files) != 1:
-        raise HTTPException(status_code=404, detail="Buyers Guide not found.")
+@app.get("/api/runs/export.csv")
+def export_run_history(
+    vin: str | None = Query(None),
+    dealership_id: int | None = Query(None),
+    status: str | None = Query(None),
+    date_from: str | None = Query(None, alias="from"),
+    date_to: str | None = Query(None, alias="to"),
+    owner_id: int = Depends(current_owner_id),
+):
+    connection = connect_db()
+    try:
+        try:
+            csv_content = export_runs_csv(
+                connection,
+                owner_id,
+                vin=vin,
+                dealership_id=dealership_id,
+                status=status,
+                date_from=date_from,
+                date_to=date_to,
+            )
+        except InvalidRunDataError as exc:
+            return _run_error_response(exc)
+    finally:
+        connection.close()
 
-    buyers_guide_file = available_files[0]
-    return FileResponse(
-        buyers_guide_file,
-        media_type="application/pdf",
-        filename=buyers_guide_file.name,
-        content_disposition_type="inline",
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="lotkit_run_history.csv"'
+            )
+        },
     )
+
+
+@app.get("/api/runs")
+def get_run_history(
+    vin: str | None = Query(None),
+    dealership_id: int | None = Query(None),
+    status: str | None = Query(None),
+    date_from: str | None = Query(None, alias="from"),
+    date_to: str | None = Query(None, alias="to"),
+    owner_id: int = Depends(current_owner_id),
+):
+    connection = connect_db()
+    try:
+        try:
+            return list_runs(
+                connection,
+                owner_id,
+                vin=vin,
+                dealership_id=dealership_id,
+                status=status,
+                date_from=date_from,
+                date_to=date_to,
+            )
+        except InvalidRunDataError as exc:
+            return _run_error_response(exc)
+    finally:
+        connection.close()
+
+
+@app.get("/api/runs/{run_id}")
+def get_saved_run(
+    run_id: str,
+    owner_id: int = Depends(current_owner_id),
+):
+    connection = connect_db()
+    try:
+        run = get_run_detail(connection, owner_id, run_id)
+    finally:
+        connection.close()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    return run
+
+
+@app.post("/api/runs/{run_id}/ready")
+def ready_saved_run(
+    run_id: str,
+    owner_id: int = Depends(current_owner_id),
+):
+    connection = connect_db()
+    try:
+        try:
+            return mark_run_ready(connection, owner_id, run_id)
+        except (
+            RunNotFoundError,
+            RunStatusConflictError,
+        ) as exc:
+            return _run_error_response(exc)
+    finally:
+        connection.close()
+
+
+@app.post("/api/runs/{run_id}/discard")
+def discard_saved_run(
+    run_id: str,
+    owner_id: int = Depends(current_owner_id),
+):
+    connection = connect_db()
+    try:
+        try:
+            discard_run(
+                connection,
+                owner_id,
+                run_id,
+                RUNS_ROOT,
+            )
+        except (
+            InvalidRunDataError,
+            RunNotFoundError,
+            RunStatusConflictError,
+        ) as exc:
+            return _run_error_response(exc)
+    finally:
+        connection.close()
+    return {"ok": True}
+
+
+@app.get("/api/runs/{run_id}/artifacts/{artifact_type}")
+def download_run_artifact(
+    run_id: str,
+    artifact_type: str,
+    owner_id: int = Depends(current_owner_id),
+):
+    if artifact_type not in {
+        "photos_zip",
+        "sticker_pdf",
+        "buyers_guide_pdf",
+    }:
+        raise HTTPException(status_code=404, detail="Run artifact not found.")
+    return _artifact_response(owner_id, run_id, artifact_type)
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

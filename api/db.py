@@ -44,6 +44,28 @@ def init_db(db_path: str | Path | None = None) -> None:
 
             CREATE INDEX IF NOT EXISTS dealership_profiles_owner_id_idx
             ON dealership_profiles(owner_id);
+
+            CREATE TABLE IF NOT EXISTS runs (
+                id INTEGER PRIMARY KEY,
+                run_id TEXT UNIQUE NOT NULL,
+                owner_id INTEGER NOT NULL REFERENCES users(id),
+                dealership_id INTEGER
+                    REFERENCES dealership_profiles(id) ON DELETE SET NULL,
+                dealership_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                vin TEXT NOT NULL,
+                vehicle_json TEXT,
+                price TEXT,
+                exterior_colour TEXT,
+                interior_colour TEXT,
+                photo_order_json TEXT,
+                outputs_json TEXT,
+                status TEXT NOT NULL DEFAULT 'in_progress',
+                created_utc TEXT,
+                updated_utc TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS runs_owner_updated_utc_idx
+            ON runs(owner_id, updated_utc);
             """
         )
         connection.commit()

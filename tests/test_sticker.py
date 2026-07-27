@@ -1,4 +1,5 @@
 import json
+import uuid
 from io import BytesIO
 
 import pytest
@@ -120,7 +121,8 @@ def test_sticker_endpoint_json_and_download(tmp_path, monkeypatch) -> None:
 
     assert response.status_code == 200
     result = response.json()
-    assert result["run_id"].startswith(f"{VIN}_")
+    assert uuid.UUID(result["run_id"]).version == 4
+    assert response.headers["X-LotKit-Run-ID"] == result["run_id"]
     assert result["download_url"] == f"/api/sticker/download/{result['run_id']}"
 
     download = client.get(result["download_url"])

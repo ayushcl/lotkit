@@ -21,7 +21,7 @@
       }
 
       main {
-        width: min(760px, 100%);
+        width: min(980px, 100%);
         margin: 0 auto;
         padding: 2rem;
         border: 1px solid #d9e2ec;
@@ -98,10 +98,24 @@
       .vehicle-form,
       .photos-section,
       .buyers-guide-section,
-      .dealerships-section {
+      .dealerships-section,
+      .run-history-section {
         margin-top: 1.5rem;
         padding-top: 1.5rem;
         border-top: 1px solid #d9e2ec;
+      }
+
+      .page-heading,
+      .section-heading {
+        display: flex;
+        align-items: start;
+        justify-content: space-between;
+        gap: 1rem;
+      }
+
+      .page-heading h1,
+      .section-heading h2 {
+        margin-bottom: 0.35rem;
       }
 
       .dealerships-section h3 {
@@ -161,7 +175,8 @@
       }
 
       button.secondary-button,
-      button.danger-button {
+      button.danger-button,
+      a.button-link {
         min-height: 2.25rem;
         padding: 0.45rem 0.7rem;
         background: white;
@@ -174,6 +189,70 @@
       button.danger-button {
         border-color: #b42318;
         color: #b42318;
+      }
+
+      a.button-link {
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid #1d4ed8;
+        border-radius: 6px;
+        color: #1d4ed8;
+        font-weight: 700;
+        text-decoration: none;
+      }
+
+      .current-run {
+        display: grid;
+        gap: 0.75rem;
+        margin: 1.25rem 0;
+        padding: 1rem;
+        border: 1px solid #93c5fd;
+        border-radius: 8px;
+        background: #eff6ff;
+      }
+
+      .current-run p {
+        margin: 0;
+      }
+
+      .current-run-summary {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        flex-wrap: wrap;
+      }
+
+      .current-run .error {
+        margin: 0;
+      }
+
+      .status-badge {
+        display: inline-flex;
+        align-items: center;
+        width: fit-content;
+        padding: 0.2rem 0.55rem;
+        border-radius: 999px;
+        color: #344054;
+        background: #e4e7ec;
+        font-size: 0.8rem;
+        font-weight: 800;
+        line-height: 1.4;
+        text-transform: capitalize;
+      }
+
+      .status-badge[data-status="in_progress"] {
+        color: #92400e;
+        background: #fef3c7;
+      }
+
+      .status-badge[data-status="ready"] {
+        color: #166534;
+        background: #dcfce7;
+      }
+
+      .status-badge[data-status="delivered"] {
+        color: #1e40af;
+        background: #dbeafe;
       }
 
       .dealership-form {
@@ -366,6 +445,120 @@
         padding-left: 1.5rem;
       }
 
+      .history-filters {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.75rem;
+        margin: 1rem 0;
+        padding: 1rem;
+        border: 1px solid #d9e2ec;
+        border-radius: 8px;
+        background: #f8fafc;
+      }
+
+      .history-filter-actions {
+        display: flex;
+        align-items: end;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        grid-column: 1 / -1;
+      }
+
+      .table-scroll {
+        overflow-x: auto;
+        border: 1px solid #d9e2ec;
+        border-radius: 8px;
+      }
+
+      .history-table {
+        width: 100%;
+        min-width: 800px;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+      }
+
+      .history-table th,
+      .history-table td {
+        padding: 0.75rem;
+        border-bottom: 1px solid #e4e7eb;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .history-table th {
+        color: #334e68;
+        background: #f8fafc;
+        font-size: 0.78rem;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+      }
+
+      .history-table tbody tr[data-run-id] {
+        cursor: pointer;
+      }
+
+      .history-table tbody tr[data-run-id]:hover,
+      .history-table tbody tr[data-run-id]:focus {
+        outline: none;
+        background: #eff6ff;
+      }
+
+      .history-table tbody tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .history-empty {
+        color: #667085;
+        text-align: center !important;
+      }
+
+      .output-list {
+        display: flex;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+      }
+
+      .output-chip {
+        padding: 0.15rem 0.45rem;
+        border-radius: 999px;
+        color: #344054;
+        background: #e4e7ec;
+        font-size: 0.75rem;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .run-detail {
+        margin-top: 1rem;
+        padding: 1rem;
+        border: 1px solid #93c5fd;
+        border-radius: 8px;
+        background: #f8fbff;
+      }
+
+      .run-detail dl {
+        display: grid;
+        grid-template-columns: max-content minmax(0, 1fr);
+        gap: 0.45rem 1rem;
+      }
+
+      .run-detail dt {
+        color: #52606d;
+        font-weight: 700;
+      }
+
+      .run-detail dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+
+      .artifact-links {
+        display: flex;
+        gap: 0.75rem;
+        margin-top: 0.75rem;
+        flex-wrap: wrap;
+      }
+
       [hidden] {
         display: none;
       }
@@ -376,7 +569,8 @@
         }
 
         .vin-row,
-        .form-grid {
+        .form-grid,
+        .history-filters {
           grid-template-columns: 1fr;
         }
 
@@ -387,13 +581,34 @@
         .full-width {
           grid-column: auto;
         }
+
+        .page-heading,
+        .section-heading {
+          align-items: stretch;
+          flex-direction: column;
+        }
+
+        .history-filter-actions {
+          grid-column: auto;
+        }
       }
     </style>
   </head>
   <body>
     <main>
-      <h1>LotKit</h1>
-      <p>Decode a VIN, then review and edit the vehicle details.</p>
+      <div class="page-heading">
+        <div>
+          <h1>LotKit</h1>
+          <p>Decode a VIN, then review and edit the vehicle details.</p>
+        </div>
+        <button
+          id="new-car-button"
+          class="secondary-button"
+          type="button"
+        >
+          New car
+        </button>
+      </div>
 
       <section id="dealerships-section" class="dealerships-section">
         <h2>Client Dealerships</h2>
@@ -534,6 +749,39 @@
         </div>
         <p id="error-message" class="error" role="alert" aria-live="polite"></p>
       </form>
+
+      <section id="current-run" class="current-run" hidden>
+        <div class="current-run-summary">
+          <strong>Current Run</strong>
+          <span id="current-run-vin"></span>
+          <span
+            id="current-run-status"
+            class="status-badge"
+            data-status="in_progress"
+          >In progress</span>
+        </div>
+        <p>
+          New outputs for this car will be added to the same saved Run.
+        </p>
+        <div class="inline-actions">
+          <button id="mark-ready-button" type="button">
+            Mark ready for delivery
+          </button>
+          <button
+            id="discard-run-button"
+            class="danger-button"
+            type="button"
+          >
+            Discard draft
+          </button>
+        </div>
+        <p
+          id="current-run-error"
+          class="error"
+          role="alert"
+          aria-live="polite"
+        ></p>
+      </section>
 
       <form id="vehicle-form" class="vehicle-form" hidden>
         <h2>Vehicle details</h2>
@@ -777,6 +1025,120 @@
           <ol id="packaged-filenames"></ol>
         </div>
       </section>
+
+      <section id="run-history-section" class="run-history-section">
+        <div class="section-heading">
+          <div>
+            <h2>Run History</h2>
+            <p class="disclaimer">
+              Review saved vehicle Runs and securely download their outputs.
+            </p>
+          </div>
+          <button
+            id="refresh-history-button"
+            class="secondary-button"
+            type="button"
+          >
+            Refresh history
+          </button>
+        </div>
+
+        <form id="history-filters" class="history-filters">
+          <div class="field">
+            <label for="history-vin">VIN contains</label>
+            <input
+              id="history-vin"
+              name="vin"
+              type="search"
+              autocomplete="off"
+            >
+          </div>
+          <div class="field">
+            <label for="history-dealership">Dealership</label>
+            <select id="history-dealership" name="dealership_id">
+              <option value="">All dealerships</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="history-status">Status</label>
+            <select id="history-status" name="status">
+              <option value="">All statuses</option>
+              <option value="in_progress">In progress</option>
+              <option value="ready">Ready</option>
+              <option value="delivered">Delivered</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="history-from">Created from</label>
+            <input id="history-from" name="from" type="date">
+          </div>
+          <div class="field">
+            <label for="history-to">Created through</label>
+            <input id="history-to" name="to" type="date">
+          </div>
+          <div class="history-filter-actions">
+            <button type="submit">Apply filters</button>
+            <button
+              id="clear-history-filters"
+              class="secondary-button"
+              type="button"
+            >
+              Clear filters
+            </button>
+            <a
+              id="history-csv-link"
+              class="button-link"
+              href="/api/runs/export.csv"
+              download
+            >
+              Download CSV
+            </a>
+          </div>
+        </form>
+
+        <p
+          id="history-error"
+          class="error"
+          role="alert"
+          aria-live="polite"
+        ></p>
+        <div class="table-scroll">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th scope="col">VIN</th>
+                <th scope="col">Vehicle</th>
+                <th scope="col">Dealership</th>
+                <th scope="col">Status</th>
+                <th scope="col">Outputs</th>
+                <th scope="col">Updated</th>
+              </tr>
+            </thead>
+            <tbody id="run-history-body">
+              <tr>
+                <td class="history-empty" colspan="6">
+                  Loading saved Runs…
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <article id="run-detail" class="run-detail" hidden>
+          <div class="section-heading">
+            <h3 id="run-detail-heading">Run details</h3>
+            <button
+              id="close-run-detail"
+              class="secondary-button"
+              type="button"
+            >
+              Close
+            </button>
+          </div>
+          <dl id="run-detail-fields"></dl>
+          <div id="run-artifact-links" class="artifact-links"></div>
+        </article>
+      </section>
     </main>
 
     <script>
@@ -848,6 +1210,49 @@
       const buyersGuidePreview = document.querySelector(
         "#buyers-guide-preview",
       );
+      const newCarButton = document.querySelector("#new-car-button");
+      const currentRunPanel = document.querySelector("#current-run");
+      const currentRunVin = document.querySelector("#current-run-vin");
+      const currentRunStatus = document.querySelector(
+        "#current-run-status",
+      );
+      const currentRunError = document.querySelector("#current-run-error");
+      const markReadyButton = document.querySelector("#mark-ready-button");
+      const discardRunButton = document.querySelector(
+        "#discard-run-button",
+      );
+      const historyFilters = document.querySelector("#history-filters");
+      const historyDealership = document.querySelector(
+        "#history-dealership",
+      );
+      const clearHistoryFiltersButton = document.querySelector(
+        "#clear-history-filters",
+      );
+      const refreshHistoryButton = document.querySelector(
+        "#refresh-history-button",
+      );
+      const historyCsvLink = document.querySelector("#history-csv-link");
+      const historyError = document.querySelector("#history-error");
+      const runHistoryBody = document.querySelector("#run-history-body");
+      const runDetail = document.querySelector("#run-detail");
+      const runDetailHeading = document.querySelector(
+        "#run-detail-heading",
+      );
+      const runDetailFields = document.querySelector("#run-detail-fields");
+      const runArtifactLinks = document.querySelector(
+        "#run-artifact-links",
+      );
+      const closeRunDetailButton = document.querySelector(
+        "#close-run-detail",
+      );
+      const ACTIVE_RUN_STORAGE_KEY = "lotkit.activeRun";
+      const RUN_MISMATCH_MESSAGE =
+        "This looks like a different vehicle — start a new car.";
+      const artifactLabels = {
+        photos_zip: "Photo ZIP",
+        sticker_pdf: "Window sticker",
+        buyers_guide_pdf: "DRAFT Buyers Guide",
+      };
       const decodedFields = [
         "year",
         "make",
@@ -883,6 +1288,9 @@
       let selectedDealership = null;
       let editingDealershipId = null;
       let dealershipSelectionToken = 0;
+      let activeRun = null;
+      let activeRunDetail = null;
+      let runHistory = [];
 
       function setError(message) {
         errorMessage.textContent = message;
@@ -896,6 +1304,404 @@
           return payload.error;
         }
         return fallback;
+      }
+
+      async function readResponsePayload(response) {
+        const contentType = response.headers.get("content-type") || "";
+        if (!contentType.includes("application/json")) {
+          return {};
+        }
+        try {
+          return await response.json();
+        } catch {
+          return {};
+        }
+      }
+
+      function requestError(response, payload, fallback) {
+        return responseError(payload, fallback);
+      }
+
+      function outputRequestError(response, payload, fallback) {
+        if (response.status === 409) {
+          return RUN_MISMATCH_MESSAGE;
+        }
+        return requestError(response, payload, fallback);
+      }
+
+      function normaliseVin(value) {
+        return String(value || "").trim().toUpperCase();
+      }
+
+      function storedActiveRun() {
+        try {
+          const stored = JSON.parse(
+            sessionStorage.getItem(ACTIVE_RUN_STORAGE_KEY) || "null",
+          );
+          if (
+            typeof stored?.run_id === "string"
+            && typeof stored?.vin === "string"
+          ) {
+            return {
+              run_id: stored.run_id,
+              vin: normaliseVin(stored.vin),
+            };
+          }
+        } catch {
+          try {
+            sessionStorage.removeItem(ACTIVE_RUN_STORAGE_KEY);
+          } catch {
+            // Ignore storage restrictions.
+          }
+        }
+        return null;
+      }
+
+      function statusLabel(status) {
+        return String(status || "in_progress").replaceAll("_", " ");
+      }
+
+      function updateCurrentRunPanel(detail = activeRunDetail) {
+        if (!activeRun) {
+          currentRunPanel.hidden = true;
+          currentRunError.textContent = "";
+          return;
+        }
+
+        const status = detail?.status || "in_progress";
+        currentRunVin.textContent = activeRun.vin;
+        currentRunStatus.dataset.status = status;
+        currentRunStatus.textContent = statusLabel(status);
+        markReadyButton.hidden = status !== "in_progress";
+        discardRunButton.hidden = status !== "in_progress";
+        currentRunPanel.hidden = false;
+      }
+
+      function setActiveRun(runId, vin, status = "in_progress") {
+        if (!runId) {
+          return;
+        }
+        activeRun = {run_id: runId, vin: normaliseVin(vin)};
+        activeRunDetail = {status};
+        try {
+          sessionStorage.setItem(
+            ACTIVE_RUN_STORAGE_KEY,
+            JSON.stringify(activeRun),
+          );
+        } catch {
+          // The Run remains active for this page even if storage is unavailable.
+        }
+        currentRunError.textContent = "";
+        updateCurrentRunPanel();
+      }
+
+      function clearActiveRun() {
+        activeRun = null;
+        activeRunDetail = null;
+        try {
+          sessionStorage.removeItem(ACTIVE_RUN_STORAGE_KEY);
+        } catch {
+          // Nothing else is needed if storage is unavailable.
+        }
+        updateCurrentRunPanel();
+      }
+
+      async function captureRunFromResponse(response) {
+        const runId = response.headers.get("X-LotKit-Run-ID");
+        if (!runId) {
+          return;
+        }
+
+        setActiveRun(runId, vinInput.value);
+        await Promise.all([
+          loadRunDetail(runId, {show: false}),
+          loadRunHistory(),
+        ]);
+      }
+
+      function restoreActiveRunForVin(vin) {
+        const stored = storedActiveRun() ?? activeRun;
+        if (!stored || stored.vin !== normaliseVin(vin)) {
+          clearActiveRun();
+          return;
+        }
+
+        setActiveRun(stored.run_id, stored.vin);
+        loadRunDetail(stored.run_id, {show: false});
+      }
+
+      function appendActiveRun(requestData) {
+        if (activeRun) {
+          requestData.append("run_id", activeRun.run_id);
+        }
+      }
+
+      function dealershipIdForOutput() {
+        return selectedDealership?.id ?? activeRunDetail?.dealership_id ?? null;
+      }
+
+      function historyQuery() {
+        const query = new URLSearchParams();
+        const values = new FormData(historyFilters);
+        for (const [field, value] of values.entries()) {
+          const cleanValue = String(value).trim();
+          if (cleanValue) {
+            query.set(field, cleanValue);
+          }
+        }
+        return query;
+      }
+
+      function updateCsvLink() {
+        const query = historyQuery().toString();
+        historyCsvLink.href = `/api/runs/export.csv${query ? `?${query}` : ""}`;
+      }
+
+      function parseObject(value) {
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          return value;
+        }
+        if (typeof value === "string") {
+          try {
+            const parsed = JSON.parse(value);
+            return parsed && typeof parsed === "object" ? parsed : {};
+          } catch {
+            return {};
+          }
+        }
+        return {};
+      }
+
+      function runOutputs(run) {
+        return parseObject(run?.outputs ?? run?.outputs_json);
+      }
+
+      function runVehicle(run) {
+        return parseObject(run?.vehicle ?? run?.vehicle_json);
+      }
+
+      function runDealership(run) {
+        return parseObject(
+          run?.dealership_snapshot ?? run?.dealership_snapshot_json,
+        );
+      }
+
+      function outputTypes(run) {
+        const outputs = runOutputs(run);
+        return Object.keys(artifactLabels).filter(
+          (artifactType) => Boolean(outputs[artifactType]),
+        );
+      }
+
+      function formatDate(value) {
+        if (!value) {
+          return "—";
+        }
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+          return String(value);
+        }
+        return date.toLocaleString();
+      }
+
+      function outputChips(run) {
+        const container = document.createElement("div");
+        container.className = "output-list";
+        const types = outputTypes(run);
+        if (!types.length) {
+          container.textContent = "—";
+          return container;
+        }
+        for (const type of types) {
+          const chip = document.createElement("span");
+          chip.className = "output-chip";
+          chip.textContent = artifactLabels[type];
+          container.append(chip);
+        }
+        return container;
+      }
+
+      function renderRunHistory() {
+        runHistoryBody.replaceChildren();
+        if (!runHistory.length) {
+          const row = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.className = "history-empty";
+          cell.colSpan = 6;
+          cell.textContent = "No saved Runs match these filters.";
+          row.append(cell);
+          runHistoryBody.append(row);
+          return;
+        }
+
+        for (const run of runHistory) {
+          const vehicle = runVehicle(run);
+          const row = document.createElement("tr");
+          row.dataset.runId = run.run_id;
+          row.tabIndex = 0;
+          row.setAttribute("aria-label", `View Run for ${run.vin}`);
+
+          const vin = document.createElement("td");
+          vin.textContent = run.vin || "—";
+
+          const vehicleCell = document.createElement("td");
+          const year = run.year ?? vehicle.year ?? "";
+          const make = run.make ?? vehicle.make ?? "";
+          const model = run.model ?? vehicle.model ?? "";
+          vehicleCell.textContent =
+            [year, make, model].filter(Boolean).join(" ") || "—";
+
+          const dealership = document.createElement("td");
+          dealership.textContent =
+            run.dealership_nickname
+            ?? runDealership(run).nickname
+            ?? "—";
+
+          const statusCell = document.createElement("td");
+          const badge = document.createElement("span");
+          badge.className = "status-badge";
+          badge.dataset.status = run.status || "in_progress";
+          badge.textContent = statusLabel(run.status);
+          statusCell.append(badge);
+
+          const outputs = document.createElement("td");
+          outputs.append(outputChips(run));
+
+          const updated = document.createElement("td");
+          updated.textContent = formatDate(run.updated_utc);
+
+          row.append(
+            vin,
+            vehicleCell,
+            dealership,
+            statusCell,
+            outputs,
+            updated,
+          );
+          runHistoryBody.append(row);
+        }
+      }
+
+      async function loadRunHistory() {
+        historyError.textContent = "";
+        refreshHistoryButton.disabled = true;
+        updateCsvLink();
+
+        try {
+          const query = historyQuery().toString();
+          const response = await fetch(`/api/runs${query ? `?${query}` : ""}`);
+          const payload = await readResponsePayload(response);
+          if (!response.ok || !Array.isArray(payload)) {
+            throw new Error(
+              requestError(
+                response,
+                payload,
+                "Run history could not be loaded.",
+              ),
+            );
+          }
+          runHistory = payload;
+          renderRunHistory();
+        } catch (error) {
+          historyError.textContent = error instanceof Error
+            ? error.message
+            : "Run history could not be loaded.";
+        } finally {
+          refreshHistoryButton.disabled = false;
+        }
+      }
+
+      function addDetailField(label, value) {
+        const term = document.createElement("dt");
+        term.textContent = label;
+        const description = document.createElement("dd");
+        description.textContent = value || "—";
+        runDetailFields.append(term, description);
+      }
+
+      function renderRunDetail(payload) {
+        const vehicle = runVehicle(payload);
+        const dealership = runDealership(payload);
+        runDetail.dataset.runId = payload.run_id || "";
+        runDetailHeading.textContent = `Run details · ${payload.vin || ""}`;
+        runDetailFields.replaceChildren();
+        addDetailField("Run ID", payload.run_id);
+        addDetailField(
+          "Vehicle",
+          [
+            vehicle.year ?? payload.year,
+            vehicle.make ?? payload.make,
+            vehicle.model ?? payload.model,
+            vehicle.trim ?? payload.trim,
+          ].filter(Boolean).join(" "),
+        );
+        addDetailField("Dealership", dealership.nickname);
+        addDetailField("Status", statusLabel(payload.status));
+        addDetailField("Price", payload.price);
+        addDetailField("Exterior colour", payload.exterior_colour);
+        addDetailField("Interior colour", payload.interior_colour);
+        addDetailField("Created", formatDate(payload.created_utc));
+        addDetailField("Updated", formatDate(payload.updated_utc));
+
+        runArtifactLinks.replaceChildren();
+        const types = outputTypes(payload);
+        if (!types.length) {
+          const empty = document.createElement("span");
+          empty.textContent = "No downloadable outputs.";
+          runArtifactLinks.append(empty);
+        } else {
+          for (const type of types) {
+            const link = document.createElement("a");
+            link.href =
+              `/api/runs/${encodeURIComponent(payload.run_id)}`
+              + `/artifacts/${type}`;
+            link.textContent = `Download ${artifactLabels[type]}`;
+            link.target = "_blank";
+            link.rel = "noopener";
+            runArtifactLinks.append(link);
+          }
+        }
+        runDetail.hidden = false;
+      }
+
+      async function loadRunDetail(runId, {show = true} = {}) {
+        try {
+          const response = await fetch(
+            `/api/runs/${encodeURIComponent(runId)}`,
+          );
+          const payload = await readResponsePayload(response);
+          if (!response.ok) {
+            if (response.status === 404 && activeRun?.run_id === runId) {
+              clearActiveRun();
+            }
+            throw new Error(
+              requestError(response, payload, "Run details could not be loaded."),
+            );
+          }
+
+          if (activeRun?.run_id === runId) {
+            activeRunDetail = payload;
+            updateCurrentRunPanel(payload);
+            const runDealershipId = payload.dealership_id;
+            if (
+              runDealershipId
+              && selectedDealership?.id !== runDealershipId
+            ) {
+              await useDealership(runDealershipId);
+            }
+          }
+          if (show) {
+            renderRunDetail(payload);
+          }
+          return payload;
+        } catch (error) {
+          if (show) {
+            historyError.textContent = error instanceof Error
+              ? error.message
+              : "Run details could not be loaded.";
+          }
+          return null;
+        }
       }
 
       function applySelectedDealership() {
@@ -1022,6 +1828,31 @@
         }
       }
 
+      function renderHistoryDealershipOptions() {
+        const selectedValue = historyDealership.value;
+        historyDealership.replaceChildren();
+
+        const allOption = document.createElement("option");
+        allOption.value = "";
+        allOption.textContent = "All dealerships";
+        historyDealership.append(allOption);
+
+        for (const profile of dealershipSummaries) {
+          const option = document.createElement("option");
+          option.value = String(profile.id);
+          option.textContent = profile.nickname;
+          historyDealership.append(option);
+        }
+
+        if (
+          Array.from(historyDealership.options).some(
+            (option) => option.value === selectedValue,
+          )
+        ) {
+          historyDealership.value = selectedValue;
+        }
+      }
+
       async function loadDealerships(preferredId = null) {
         dealershipError.textContent = "";
 
@@ -1035,6 +1866,7 @@
           }
 
           dealershipSummaries = payload;
+          renderHistoryDealershipOptions();
           const targetId = preferredId ?? selectedDealership?.id ?? null;
           const targetExists = targetId !== null
             && dealershipSummaries.some((profile) => profile.id === targetId);
@@ -1255,6 +2087,155 @@
         renderPhotoGrid();
       }
 
+      function resetCurrentCar() {
+        clearActiveRun();
+        vinForm.reset();
+        vehicleForm.reset();
+        vehicleForm.hidden = true;
+        photosSection.hidden = true;
+        buyersGuideSection.hidden = true;
+        setPhotoFiles([]);
+        setError("");
+        stickerError.textContent = "";
+        stickerResult.hidden = true;
+        stickerPreview.removeAttribute("src");
+        buyersGuideError.textContent = "";
+        buyersGuideResult.hidden = true;
+        buyersGuidePreview.removeAttribute("src");
+        currentRunError.textContent = "";
+        formState = {};
+        vinInput.focus();
+      }
+
+      async function markActiveRunReady() {
+        if (!activeRun) {
+          return;
+        }
+
+        currentRunError.textContent = "";
+        markReadyButton.disabled = true;
+        try {
+          const response = await fetch(
+            `/api/runs/${encodeURIComponent(activeRun.run_id)}/ready`,
+            {method: "POST"},
+          );
+          const payload = await readResponsePayload(response);
+          if (!response.ok) {
+            throw new Error(
+              requestError(
+                response,
+                payload,
+                "The Run could not be marked ready.",
+              ),
+            );
+          }
+          activeRunDetail = payload;
+          updateCurrentRunPanel(payload);
+          await loadRunHistory();
+          if (!runDetail.hidden) {
+            renderRunDetail(payload);
+          }
+        } catch (error) {
+          currentRunError.textContent = error instanceof Error
+            ? error.message
+            : "The Run could not be marked ready.";
+        } finally {
+          markReadyButton.disabled = false;
+        }
+      }
+
+      async function discardActiveRun() {
+        if (
+          !activeRun
+          || !window.confirm(
+            "Discard this in-progress Run and all of its generated files?",
+          )
+        ) {
+          return;
+        }
+
+        const discardedRunId = activeRun.run_id;
+        currentRunError.textContent = "";
+        discardRunButton.disabled = true;
+        try {
+          const response = await fetch(
+            `/api/runs/${encodeURIComponent(discardedRunId)}/discard`,
+            {method: "POST"},
+          );
+          const payload = await readResponsePayload(response);
+          if (!response.ok) {
+            throw new Error(
+              requestError(response, payload, "The draft could not be discarded."),
+            );
+          }
+
+          clearActiveRun();
+          stickerResult.hidden = true;
+          stickerPreview.removeAttribute("src");
+          buyersGuideResult.hidden = true;
+          buyersGuidePreview.removeAttribute("src");
+          packageResult.hidden = true;
+          if (
+            runDetail.dataset.runId === discardedRunId
+            || runDetailHeading.textContent.includes(discardedRunId)
+          ) {
+            runDetail.hidden = true;
+          }
+          await loadRunHistory();
+        } catch (error) {
+          currentRunError.textContent = error instanceof Error
+            ? error.message
+            : "The draft could not be discarded.";
+        } finally {
+          discardRunButton.disabled = false;
+        }
+      }
+
+      newCarButton.addEventListener("click", resetCurrentCar);
+      markReadyButton.addEventListener("click", markActiveRunReady);
+      discardRunButton.addEventListener("click", discardActiveRun);
+      refreshHistoryButton.addEventListener("click", loadRunHistory);
+      closeRunDetailButton.addEventListener("click", () => {
+        runDetail.hidden = true;
+      });
+
+      historyFilters.addEventListener("submit", (event) => {
+        event.preventDefault();
+        runDetail.hidden = true;
+        loadRunHistory();
+      });
+
+      historyFilters.addEventListener("change", updateCsvLink);
+      historyFilters.addEventListener("input", updateCsvLink);
+      clearHistoryFiltersButton.addEventListener("click", () => {
+        historyFilters.reset();
+        runDetail.hidden = true;
+        updateCsvLink();
+        loadRunHistory();
+      });
+
+      function openRunFromHistory(event) {
+        const row = event.target.closest("tr[data-run-id]");
+        if (!row) {
+          return;
+        }
+        if (
+          event.type === "keydown"
+          && event.key !== "Enter"
+          && event.key !== " "
+        ) {
+          return;
+        }
+        if (event.type === "keydown") {
+          event.preventDefault();
+        }
+        historyError.textContent = "";
+        loadRunDetail(row.dataset.runId);
+      }
+
+      runHistoryBody.addEventListener("click", openRunFromHistory);
+      runHistoryBody.addEventListener("keydown", openRunFromHistory);
+
       newDealershipButton.addEventListener("click", showNewDealershipForm);
       cancelDealershipButton.addEventListener("click", hideDealershipForm);
 
@@ -1367,12 +2348,14 @@
         requestData.append("dealer", JSON.stringify(dealer));
         requestData.append("price", document.querySelector("#price").value);
         requestData.append("extras", JSON.stringify(extras));
-        if (selectedDealership) {
+        const outputDealershipId = dealershipIdForOutput();
+        if (outputDealershipId !== null) {
           requestData.append(
             "dealership_id",
-            String(selectedDealership.id),
+            String(outputDealershipId),
           );
         }
+        appendActiveRun(requestData);
         if (dealerLogo.files[0]) {
           requestData.append("logo", dealerLogo.files[0]);
         }
@@ -1385,18 +2368,23 @@
             method: "POST",
             body: requestData,
           });
-          const payload = await response.json();
+          const payload = await readResponsePayload(response);
 
           if (!response.ok) {
             const detail = payload.error === "invalid_vin"
               ? "Enter a valid 17-character VIN before generating the sticker."
-              : payload.detail;
+              : outputRequestError(
+                  response,
+                  payload,
+                  "The window sticker could not be generated.",
+                );
             throw new Error(detail || "The window sticker could not be generated.");
           }
 
           stickerDownload.href = payload.download_url;
           stickerPreview.src = payload.download_url;
           stickerResult.hidden = false;
+          await captureRunFromResponse(response);
         } catch (error) {
           const message = error instanceof Error
             ? error.message
@@ -1429,25 +2417,50 @@
         buyersGuideButton.textContent = "Generating…";
 
         try {
+          const vehicle = {};
+          for (const field of decodedFields) {
+            vehicle[field] = document.querySelector(`#${field}`).value;
+          }
+          const requestBody = {
+            vin: vinInput.value,
+            make: vehicle.make,
+            model: vehicle.model,
+            year: vehicle.year,
+            version: buyersGuideVersion.value,
+            vehicle,
+            price: document.querySelector("#price").value,
+            exterior_colour: document.querySelector(
+              "#exterior-colour",
+            ).value,
+            interior_colour: document.querySelector(
+              "#interior-colour",
+            ).value,
+          };
+          if (activeRun) {
+            requestBody.run_id = activeRun.run_id;
+          }
+          const outputDealershipId = dealershipIdForOutput();
+          if (outputDealershipId !== null) {
+            requestBody.dealership_id = outputDealershipId;
+          }
+
           const response = await fetch("/api/buyers-guide", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({
-              vin: vinInput.value,
-              make: document.querySelector("#make").value,
-              model: document.querySelector("#model").value,
-              year: document.querySelector("#year").value,
-              version: buyersGuideVersion.value,
-            }),
+            body: JSON.stringify(requestBody),
           });
-          const payload = await response.json();
+          const payload = await readResponsePayload(response);
 
           if (!response.ok) {
             const detail = payload.error === "invalid_vin"
               ? "Enter a valid 17-character VIN before generating the Buyers Guide."
               : payload.error === "version_required"
                 ? "Choose the Buyers Guide form your dealer requires."
-                : payload.detail;
+                : outputRequestError(
+                    response,
+                    payload,
+                    "The Buyers Guide could not be generated.",
+                  );
             throw new Error(
               detail || "The Buyers Guide could not be generated.",
             );
@@ -1456,6 +2469,7 @@
           buyersGuideDownload.href = payload.download_url;
           buyersGuidePreview.src = payload.download_url;
           buyersGuideResult.hidden = false;
+          await captureRunFromResponse(response);
         } catch (error) {
           buyersGuideError.textContent = error instanceof Error
             ? error.message
@@ -1554,6 +2568,11 @@
           "order",
           JSON.stringify(selectedPhotos.map((photo) => photo.file.name)),
         );
+        const outputDealershipId = dealershipIdForOutput();
+        if (outputDealershipId !== null) {
+          requestData.append("dealership_id", String(outputDealershipId));
+        }
+        appendActiveRun(requestData);
         for (const photo of selectedPhotos) {
           requestData.append("photos", photo.file, photo.file.name);
         }
@@ -1566,10 +2585,16 @@
             method: "POST",
             body: requestData,
           });
-          const payload = await response.json();
+          const payload = await readResponsePayload(response);
 
           if (!response.ok) {
-            throw new Error(payload.detail || "The photos could not be packaged.");
+            throw new Error(
+              outputRequestError(
+                response,
+                payload,
+                "The photos could not be packaged.",
+              ),
+            );
           }
 
           packageSummary.textContent =
@@ -1585,6 +2610,7 @@
             packagedFilenames.append(item);
           }
           packageResult.hidden = false;
+          await captureRunFromResponse(response);
         } catch (error) {
           const message = error instanceof Error
             ? error.message
@@ -1608,7 +2634,7 @@
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({vin: vinInput.value}),
           });
-          const payload = await response.json();
+          const payload = await readResponsePayload(response);
 
           if (!response.ok) {
             throw new Error(payload.detail || "The VIN could not be decoded.");
@@ -1616,6 +2642,7 @@
 
           vinInput.value = payload.vin;
           populateVehicleForm(payload.vehicle);
+          restoreActiveRunForVin(payload.vin);
         } catch (error) {
           const message = error instanceof Error
             ? error.message
@@ -1627,7 +2654,9 @@
         }
       });
 
+      updateCsvLink();
       loadDealerships();
+      loadRunHistory();
     </script>
   </body>
 </html>
