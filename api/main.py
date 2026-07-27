@@ -1,16 +1,39 @@
 import json
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from api.auth import current_owner_id, get_or_create_default_owner
 from api.buyers_guide import render_buyers_guide
+from api.db import connect_db, init_db
 from api.decode import VinDecodeError, decode_vin
+from api.dealerships import (
+    InvalidLogoError,
+    create_profile,
+    delete_profile,
+    get_profile,
+    get_profile_row,
+    list_profiles,
+    logo_media_type,
+    resolve_logo_path,
+    update_profile,
+    validate_logo,
+)
 from api.photos import build_run
 from api.sticker import build_sticker_pdf
 from api.vin import is_valid_vin, normalize_vin
@@ -22,7 +45,19 @@ RUN_ID_PATTERN = re.compile(r"^[A-HJ-NPR-Z0-9]{17}_\d{8}T\d{6}Z$")
 
 load_dotenv(BASE_DIR / ".env")
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    init_db()
+    connection = connect_db()
+    try:
+        get_or_create_default_owner(connection)
+    finally:
+        connection.close()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 class VinRequest(BaseModel):
@@ -40,6 +75,200 @@ class BuyersGuideRequest(BaseModel):
 @app.get("/health")
 def health() -> dict[str, bool | str]:
     return {"ok": True, "service": "lotkit"}
+
+
+def _dealership_values(
+    nickname: str | None,
+    dealership_name: str | None,
+    address: str | None,
+    phone: str | None,
+    email: str | None,
+    complaints_contact: str | None,
+    sticker_footer_text: str | None,
+    notes: str | None,
+) -> dict[str, str]:
+    values = {
+        "nickname": nickname or "",
+        "dealership_name": dealership_name or "",
+        "address": address or "",
+        "phone": phone or "",
+        "email": email or "",
+        "complaints_contact": complaints_contact or "",
+        "sticker_footer_text": sticker_footer_text or "",
+        "notes": notes or "",
+    }
+    if not values["nickname"].strip():
+        raise HTTPException(status_code=422, detail="Nickname is required.")
+    return values
+
+
+async def _read_dealership_logo(
+    logo: UploadFile | None,
+) -> tuple[str, bytes] | None:
+    if logo is None or not logo.filename:
+        return None
+
+    try:
+        file_bytes = await logo.read()
+    finally:
+        await logo.close()
+
+    try:
+        extension = validate_logo(logo.filename, file_bytes)
+    except InvalidLogoError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return extension, file_bytes
+
+
+@app.post("/api/dealerships")
+async def create_dealership(
+    nickname: str | None = Form(None),
+    dealership_name: str | None = Form(None),
+    address: str | None = Form(None),
+    phone: str | None = Form(None),
+    email: str | None = Form(None),
+    complaints_contact: str | None = Form(None),
+    sticker_footer_text: str | None = Form(None),
+    notes: str | None = Form(None),
+    logo: UploadFile | None = File(None),
+    owner_id: int = Depends(current_owner_id),
+):
+    values = _dealership_values(
+        nickname,
+        dealership_name,
+        address,
+        phone,
+        email,
+        complaints_contact,
+        sticker_footer_text,
+        notes,
+    )
+    prepared_logo = await _read_dealership_logo(logo)
+
+    connection = connect_db()
+    try:
+        return create_profile(connection, owner_id, values, prepared_logo)
+    finally:
+        connection.close()
+
+
+@app.get("/api/dealerships")
+def get_dealerships(owner_id: int = Depends(current_owner_id)):
+    connection = connect_db()
+    try:
+        return list_profiles(connection, owner_id)
+    finally:
+        connection.close()
+
+
+@app.get("/api/dealerships/{profile_id}")
+def get_dealership(
+    profile_id: int,
+    owner_id: int = Depends(current_owner_id),
+):
+    connection = connect_db()
+    try:
+        profile = get_profile(connection, owner_id, profile_id)
+    finally:
+        connection.close()
+
+    if profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Dealership profile not found.",
+        )
+    return profile
+
+
+@app.put("/api/dealerships/{profile_id}")
+async def update_dealership(
+    profile_id: int,
+    nickname: str | None = Form(None),
+    dealership_name: str | None = Form(None),
+    address: str | None = Form(None),
+    phone: str | None = Form(None),
+    email: str | None = Form(None),
+    complaints_contact: str | None = Form(None),
+    sticker_footer_text: str | None = Form(None),
+    notes: str | None = Form(None),
+    logo: UploadFile | None = File(None),
+    owner_id: int = Depends(current_owner_id),
+):
+    values = _dealership_values(
+        nickname,
+        dealership_name,
+        address,
+        phone,
+        email,
+        complaints_contact,
+        sticker_footer_text,
+        notes,
+    )
+    prepared_logo = await _read_dealership_logo(logo)
+
+    connection = connect_db()
+    try:
+        profile = update_profile(
+            connection,
+            owner_id,
+            profile_id,
+            values,
+            prepared_logo,
+        )
+    finally:
+        connection.close()
+
+    if profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Dealership profile not found.",
+        )
+    return profile
+
+
+@app.delete("/api/dealerships/{profile_id}")
+def delete_dealership(
+    profile_id: int,
+    owner_id: int = Depends(current_owner_id),
+):
+    connection = connect_db()
+    try:
+        deleted = delete_profile(connection, owner_id, profile_id)
+    finally:
+        connection.close()
+
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail="Dealership profile not found.",
+        )
+    return {"ok": True}
+
+
+@app.get("/api/dealerships/{profile_id}/logo")
+def get_dealership_logo(
+    profile_id: int,
+    owner_id: int = Depends(current_owner_id),
+):
+    connection = connect_db()
+    try:
+        profile = get_profile_row(connection, owner_id, profile_id)
+    finally:
+        connection.close()
+
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Dealership logo not found.")
+
+    logo_file = resolve_logo_path(profile["logo_path"])
+    if logo_file is None or not logo_file.is_file():
+        raise HTTPException(status_code=404, detail="Dealership logo not found.")
+
+    return FileResponse(
+        logo_file,
+        media_type=logo_media_type(logo_file),
+        filename=logo_file.name,
+        content_disposition_type="inline",
+    )
 
 
 @app.post("/api/decode")
@@ -174,7 +403,10 @@ def _parse_sticker_object(value, field_name: str, required: bool = False):
 
 
 @app.post("/api/sticker")
-async def create_sticker(request: Request):
+async def create_sticker(
+    request: Request,
+    owner_id: int = Depends(current_owner_id),
+):
     content_type = request.headers.get("content-type", "").lower()
     logo_bytes = None
 
@@ -201,6 +433,7 @@ async def create_sticker(request: Request):
             "dealer": form.get("dealer"),
             "price": form.get("price"),
             "extras": form.get("extras"),
+            "dealership_id": form.get("dealership_id"),
         }
         logo = form.get("logo")
         if logo is not None and hasattr(logo, "read"):
@@ -232,6 +465,50 @@ async def create_sticker(request: Request):
             status_code=422,
             content={"error": "invalid_request", "detail": str(exc)},
         )
+
+    dealership_id_value = payload.get("dealership_id")
+    if dealership_id_value not in (None, ""):
+        try:
+            if isinstance(dealership_id_value, bool):
+                raise ValueError
+            dealership_id = int(dealership_id_value)
+            if dealership_id <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": "invalid_dealership",
+                    "detail": "Dealership profile is invalid or not owned.",
+                },
+            )
+
+        connection = connect_db()
+        try:
+            profile = get_profile_row(connection, owner_id, dealership_id)
+        finally:
+            connection.close()
+        if profile is None:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": "invalid_dealership",
+                    "detail": "Dealership profile is invalid or not owned.",
+                },
+            )
+
+        profile_dealer = {
+            "name": profile["dealership_name"] or "",
+            "address": profile["address"] or "",
+            "phone": profile["phone"] or "",
+            "footer_text": profile["sticker_footer_text"] or "",
+        }
+        dealer_data = {**profile_dealer, **dealer_data}
+
+        if logo_bytes is None:
+            profile_logo = resolve_logo_path(profile["logo_path"])
+            if profile_logo is not None and profile_logo.is_file():
+                logo_bytes = profile_logo.read_bytes()
 
     if logo_bytes:
         dealer_data = {**dealer_data, "logo_bytes": logo_bytes}

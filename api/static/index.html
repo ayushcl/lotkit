@@ -53,6 +53,7 @@
 
       input,
       select,
+      textarea,
       button {
         min-height: 2.75rem;
         border: 1px solid #9fb3c8;
@@ -64,9 +65,14 @@
       }
 
       input:focus,
-      select:focus {
+      select:focus,
+      textarea:focus {
         outline: 3px solid rgb(37 99 235 / 18%);
         border-color: #2563eb;
+      }
+
+      textarea {
+        resize: vertical;
       }
 
       button {
@@ -91,10 +97,98 @@
 
       .vehicle-form,
       .photos-section,
-      .buyers-guide-section {
+      .buyers-guide-section,
+      .dealerships-section {
         margin-top: 1.5rem;
         padding-top: 1.5rem;
         border-top: 1px solid #d9e2ec;
+      }
+
+      .dealerships-section h3 {
+        margin: 0;
+      }
+
+      .dealership-list {
+        display: grid;
+        gap: 0.75rem;
+        margin: 1rem 0;
+      }
+
+      .dealership-card {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 0.75rem;
+        align-items: center;
+        padding: 0.85rem;
+        border: 1px solid #d9e2ec;
+        border-radius: 8px;
+        background: #fff;
+      }
+
+      .dealership-card.is-selected {
+        border-color: #2563eb;
+        background: #eff6ff;
+      }
+
+      .dealership-summary {
+        display: grid;
+        gap: 0.2rem;
+      }
+
+      .dealership-summary small,
+      .dealer-profile-note {
+        color: #52606d;
+      }
+
+      .dealership-choice {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        margin-top: 0.35rem;
+        font-size: 0.9rem;
+        font-weight: 600;
+      }
+
+      .dealership-choice input {
+        width: auto;
+        min-height: auto;
+      }
+
+      .inline-actions {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+
+      button.secondary-button,
+      button.danger-button {
+        min-height: 2.25rem;
+        padding: 0.45rem 0.7rem;
+        background: white;
+      }
+
+      button.secondary-button {
+        color: #1d4ed8;
+      }
+
+      button.danger-button {
+        border-color: #b42318;
+        color: #b42318;
+      }
+
+      .dealership-form {
+        display: grid;
+        gap: 1rem;
+        margin-top: 1rem;
+        padding: 1rem;
+        border: 1px solid #d9e2ec;
+        border-radius: 8px;
+        background: #f8fafc;
+      }
+
+      .dealership-empty {
+        margin: 0;
+        color: #667085;
       }
 
       .form-grid {
@@ -286,6 +380,10 @@
           grid-template-columns: 1fr;
         }
 
+        .dealership-card {
+          grid-template-columns: 1fr;
+        }
+
         .full-width {
           grid-column: auto;
         }
@@ -296,6 +394,126 @@
     <main>
       <h1>LotKit</h1>
       <p>Decode a VIN, then review and edit the vehicle details.</p>
+
+      <section id="dealerships-section" class="dealerships-section">
+        <h2>Client Dealerships</h2>
+        <p class="disclaimer">Saved dealership contact details will also help complete the Buyers Guide back page in a later step. You still choose the Buyers Guide form per vehicle.</p>
+        <div id="dealership-list" class="dealership-list"></div>
+        <div class="inline-actions">
+          <button id="new-dealership-button" type="button">
+            ＋ New dealership
+          </button>
+        </div>
+        <p
+          id="dealership-error"
+          class="error"
+          role="alert"
+          aria-live="polite"
+        ></p>
+
+        <form
+          id="dealership-form"
+          class="dealership-form"
+          enctype="multipart/form-data"
+          novalidate
+          hidden
+        >
+          <h3 id="dealership-form-title">New dealership</h3>
+          <div class="form-grid">
+            <div class="field">
+              <label for="profile-nickname">Nickname *</label>
+              <input
+                id="profile-nickname"
+                name="nickname"
+                type="text"
+                required
+              >
+            </div>
+            <div class="field">
+              <label for="profile-dealership-name">Dealership name</label>
+              <input
+                id="profile-dealership-name"
+                name="dealership_name"
+                type="text"
+              >
+            </div>
+            <div class="field full-width">
+              <label for="profile-address">Address</label>
+              <input id="profile-address" name="address" type="text">
+            </div>
+            <div class="field">
+              <label for="profile-phone">Phone</label>
+              <input id="profile-phone" name="phone" type="tel">
+            </div>
+            <div class="field">
+              <label for="profile-email">Email</label>
+              <input id="profile-email" name="email" type="email">
+            </div>
+            <div class="field full-width">
+              <label for="profile-complaints-contact">
+                Complaints contact
+              </label>
+              <input
+                id="profile-complaints-contact"
+                name="complaints_contact"
+                type="text"
+              >
+            </div>
+            <div class="field full-width">
+              <label for="profile-sticker-footer">
+                Sticker footer text
+              </label>
+              <input
+                id="profile-sticker-footer"
+                name="sticker_footer_text"
+                type="text"
+              >
+            </div>
+            <div class="field full-width">
+              <label for="profile-notes">Notes</label>
+              <textarea
+                id="profile-notes"
+                name="notes"
+                rows="3"
+              ></textarea>
+            </div>
+            <div class="field full-width">
+              <label for="profile-logo">Logo</label>
+              <input
+                id="profile-logo"
+                name="logo"
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+              >
+              <a
+                id="profile-current-logo"
+                href=""
+                target="_blank"
+                rel="noopener"
+                hidden
+              >View current logo</a>
+            </div>
+          </div>
+          <div class="inline-actions">
+            <button id="save-dealership-button" type="submit">
+              Save dealership
+            </button>
+            <button
+              id="cancel-dealership-button"
+              class="secondary-button"
+              type="button"
+            >
+              Cancel
+            </button>
+          </div>
+          <p
+            id="dealership-form-error"
+            class="error"
+            role="alert"
+            aria-live="polite"
+          ></p>
+        </form>
+      </section>
 
       <form id="vin-form">
         <div class="vin-row">
@@ -420,6 +638,9 @@
           </div>
           <fieldset class="dealer-details full-width">
             <legend>Dealer details</legend>
+            <p id="dealer-profile-note" class="dealer-profile-note">
+              No saved dealership selected.
+            </p>
             <div class="form-grid">
               <div class="field">
                 <label for="dealer-name">Dealer name</label>
@@ -453,6 +674,9 @@
                   type="file"
                   accept="image/png,image/jpeg"
                 >
+                <small id="dealer-logo-help">
+                  A logo uploaded here overrides a saved dealership logo.
+                </small>
               </div>
             </div>
           </fieldset>
@@ -561,6 +785,30 @@
       const vinInput = document.querySelector("#vin");
       const decodeButton = document.querySelector("#decode-button");
       const errorMessage = document.querySelector("#error-message");
+      const dealershipList = document.querySelector("#dealership-list");
+      const newDealershipButton = document.querySelector(
+        "#new-dealership-button",
+      );
+      const dealershipError = document.querySelector("#dealership-error");
+      const dealershipForm = document.querySelector("#dealership-form");
+      const dealershipFormTitle = document.querySelector(
+        "#dealership-form-title",
+      );
+      const dealershipFormError = document.querySelector(
+        "#dealership-form-error",
+      );
+      const saveDealershipButton = document.querySelector(
+        "#save-dealership-button",
+      );
+      const cancelDealershipButton = document.querySelector(
+        "#cancel-dealership-button",
+      );
+      const profileCurrentLogo = document.querySelector(
+        "#profile-current-logo",
+      );
+      const dealerProfileNote = document.querySelector(
+        "#dealer-profile-note",
+      );
       const photosSection = document.querySelector("#photos-section");
       const photosInput = document.querySelector("#photos");
       const photoDropzone = document.querySelector("#photo-dropzone");
@@ -611,13 +859,295 @@
         "drive",
         "doors",
       ];
+      const dealershipFormFields = {
+        nickname: "profile-nickname",
+        dealership_name: "profile-dealership-name",
+        address: "profile-address",
+        phone: "profile-phone",
+        email: "profile-email",
+        complaints_contact: "profile-complaints-contact",
+        sticker_footer_text: "profile-sticker-footer",
+        notes: "profile-notes",
+      };
+      const dealerProfileFields = {
+        dealership_name: "dealer-name",
+        address: "dealer-address",
+        phone: "dealer-phone",
+        sticker_footer_text: "dealer-footer",
+      };
       let formState = {};
       let selectedPhotos = [];
       let nextPhotoId = 0;
       let draggedPhotoId = null;
+      let dealershipSummaries = [];
+      let selectedDealership = null;
+      let editingDealershipId = null;
+      let dealershipSelectionToken = 0;
 
       function setError(message) {
         errorMessage.textContent = message;
+      }
+
+      function responseError(payload, fallback) {
+        if (typeof payload?.detail === "string") {
+          return payload.detail;
+        }
+        if (typeof payload?.error === "string") {
+          return payload.error;
+        }
+        return fallback;
+      }
+
+      function applySelectedDealership() {
+        if (!selectedDealership) {
+          dealerProfileNote.textContent = "No saved dealership selected.";
+          return;
+        }
+
+        for (const [profileField, dealerFieldId] of Object.entries(
+          dealerProfileFields,
+        )) {
+          document.querySelector(`#${dealerFieldId}`).value =
+            selectedDealership[profileField] ?? "";
+        }
+        dealerLogo.value = "";
+        dealerProfileNote.textContent =
+          `Using saved dealership: ${selectedDealership.nickname}. `
+          + "You can override any field below.";
+      }
+
+      function clearSelectedDealership(clearDealerFields = true) {
+        dealershipSelectionToken += 1;
+        selectedDealership = null;
+        dealerProfileNote.textContent = "No saved dealership selected.";
+        dealerLogo.value = "";
+
+        if (clearDealerFields) {
+          for (const dealerFieldId of Object.values(dealerProfileFields)) {
+            document.querySelector(`#${dealerFieldId}`).value = "";
+          }
+        }
+        renderDealerships();
+      }
+
+      function renderDealerships() {
+        dealershipList.replaceChildren();
+
+        if (!dealershipSummaries.length) {
+          const emptyMessage = document.createElement("p");
+          emptyMessage.className = "dealership-empty";
+          emptyMessage.textContent = "No dealerships saved yet.";
+          dealershipList.append(emptyMessage);
+          return;
+        }
+
+        for (const profile of dealershipSummaries) {
+          const card = document.createElement("article");
+          card.className = "dealership-card";
+          if (selectedDealership?.id === profile.id) {
+            card.classList.add("is-selected");
+          }
+
+          const summary = document.createElement("div");
+          summary.className = "dealership-summary";
+
+          const nickname = document.createElement("strong");
+          nickname.textContent = profile.nickname;
+
+          const dealershipName = document.createElement("small");
+          const details = profile.dealership_name || "Dealership name not set";
+          dealershipName.textContent = profile.has_logo
+            ? `${details} · Logo saved`
+            : details;
+
+          const choice = document.createElement("label");
+          choice.className = "dealership-choice";
+          const radio = document.createElement("input");
+          radio.type = "radio";
+          radio.name = "active-dealership";
+          radio.value = String(profile.id);
+          radio.checked = selectedDealership?.id === profile.id;
+          const choiceText = document.createElement("span");
+          choiceText.textContent = "Use this dealership";
+          choice.append(radio, choiceText);
+          summary.append(nickname, dealershipName, choice);
+
+          const actions = document.createElement("div");
+          actions.className = "inline-actions";
+          const editButton = document.createElement("button");
+          editButton.type = "button";
+          editButton.className = "secondary-button";
+          editButton.dataset.action = "edit";
+          editButton.dataset.profileId = String(profile.id);
+          editButton.textContent = "Edit";
+          const deleteButton = document.createElement("button");
+          deleteButton.type = "button";
+          deleteButton.className = "danger-button";
+          deleteButton.dataset.action = "delete";
+          deleteButton.dataset.profileId = String(profile.id);
+          deleteButton.textContent = "Delete";
+          actions.append(editButton, deleteButton);
+
+          card.append(summary, actions);
+          dealershipList.append(card);
+        }
+      }
+
+      async function useDealership(profileId) {
+        const selectionToken = ++dealershipSelectionToken;
+        dealershipError.textContent = "";
+
+        try {
+          const response = await fetch(`/api/dealerships/${profileId}`);
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(
+              responseError(payload, "The dealership could not be loaded."),
+            );
+          }
+          if (selectionToken !== dealershipSelectionToken) {
+            return;
+          }
+
+          selectedDealership = payload;
+          applySelectedDealership();
+          renderDealerships();
+        } catch (error) {
+          if (selectionToken !== dealershipSelectionToken) {
+            return;
+          }
+          dealershipError.textContent = error instanceof Error
+            ? error.message
+            : "The dealership could not be loaded.";
+        }
+      }
+
+      async function loadDealerships(preferredId = null) {
+        dealershipError.textContent = "";
+
+        try {
+          const response = await fetch("/api/dealerships");
+          const payload = await response.json();
+          if (!response.ok || !Array.isArray(payload)) {
+            throw new Error(
+              responseError(payload, "Saved dealerships could not be loaded."),
+            );
+          }
+
+          dealershipSummaries = payload;
+          const targetId = preferredId ?? selectedDealership?.id ?? null;
+          const targetExists = targetId !== null
+            && dealershipSummaries.some((profile) => profile.id === targetId);
+
+          if (selectedDealership && !targetExists) {
+            clearSelectedDealership(true);
+          } else {
+            renderDealerships();
+          }
+
+          if (targetExists) {
+            await useDealership(targetId);
+          }
+        } catch (error) {
+          dealershipError.textContent = error instanceof Error
+            ? error.message
+            : "Saved dealerships could not be loaded.";
+        }
+      }
+
+      function hideDealershipForm() {
+        editingDealershipId = null;
+        dealershipForm.reset();
+        dealershipFormError.textContent = "";
+        profileCurrentLogo.hidden = true;
+        profileCurrentLogo.removeAttribute("href");
+        dealershipForm.hidden = true;
+      }
+
+      function showNewDealershipForm() {
+        editingDealershipId = null;
+        dealershipForm.reset();
+        dealershipFormTitle.textContent = "New dealership";
+        dealershipFormError.textContent = "";
+        profileCurrentLogo.hidden = true;
+        profileCurrentLogo.removeAttribute("href");
+        dealershipForm.hidden = false;
+        document.querySelector("#profile-nickname").focus();
+      }
+
+      async function showEditDealershipForm(profileId) {
+        dealershipFormError.textContent = "";
+        dealershipError.textContent = "";
+
+        try {
+          const response = await fetch(`/api/dealerships/${profileId}`);
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(
+              responseError(payload, "The dealership could not be loaded."),
+            );
+          }
+
+          editingDealershipId = profileId;
+          dealershipForm.reset();
+          dealershipFormTitle.textContent = `Edit ${payload.nickname}`;
+          for (const [field, elementId] of Object.entries(
+            dealershipFormFields,
+          )) {
+            document.querySelector(`#${elementId}`).value =
+              payload[field] ?? "";
+          }
+          profileCurrentLogo.hidden = !payload.has_logo;
+          if (payload.has_logo) {
+            profileCurrentLogo.href = payload.logo_url;
+          } else {
+            profileCurrentLogo.removeAttribute("href");
+          }
+          dealershipForm.hidden = false;
+          document.querySelector("#profile-nickname").focus();
+        } catch (error) {
+          dealershipError.textContent = error instanceof Error
+            ? error.message
+            : "The dealership could not be loaded.";
+        }
+      }
+
+      async function deleteDealership(profileId, button) {
+        const summary = dealershipSummaries.find(
+          (profile) => profile.id === profileId,
+        );
+        const label = summary?.nickname || "this dealership";
+        if (!window.confirm(`Delete ${label}?`)) {
+          return;
+        }
+
+        dealershipError.textContent = "";
+        button.disabled = true;
+        try {
+          const response = await fetch(`/api/dealerships/${profileId}`, {
+            method: "DELETE",
+          });
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(
+              responseError(payload, "The dealership could not be deleted."),
+            );
+          }
+
+          if (selectedDealership?.id === profileId) {
+            clearSelectedDealership(true);
+          }
+          if (editingDealershipId === profileId) {
+            hideDealershipForm();
+          }
+          await loadDealerships();
+        } catch (error) {
+          dealershipError.textContent = error instanceof Error
+            ? error.message
+            : "The dealership could not be deleted.";
+        } finally {
+          button.disabled = false;
+        }
       }
 
       function populateVehicleForm(vehicle) {
@@ -633,6 +1163,7 @@
           document.querySelector(`#${field}`).value = value;
           formState[field] = value;
         }
+        applySelectedDealership();
 
         vehicleForm.hidden = false;
         photosSection.hidden = false;
@@ -724,6 +1255,76 @@
         renderPhotoGrid();
       }
 
+      newDealershipButton.addEventListener("click", showNewDealershipForm);
+      cancelDealershipButton.addEventListener("click", hideDealershipForm);
+
+      dealershipList.addEventListener("change", (event) => {
+        if (event.target.name !== "active-dealership") {
+          return;
+        }
+        useDealership(Number(event.target.value));
+      });
+
+      dealershipList.addEventListener("click", (event) => {
+        const button = event.target.closest("button[data-action]");
+        if (!button) {
+          return;
+        }
+
+        const profileId = Number(button.dataset.profileId);
+        if (button.dataset.action === "edit") {
+          showEditDealershipForm(profileId);
+        } else if (button.dataset.action === "delete") {
+          deleteDealership(profileId, button);
+        }
+      });
+
+      dealershipForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        dealershipFormError.textContent = "";
+
+        const nickname = document.querySelector("#profile-nickname").value
+          .trim();
+        if (!nickname) {
+          dealershipFormError.textContent = "Nickname is required.";
+          document.querySelector("#profile-nickname").focus();
+          return;
+        }
+
+        const requestData = new FormData(dealershipForm);
+        requestData.set("nickname", nickname);
+        const endpoint = editingDealershipId === null
+          ? "/api/dealerships"
+          : `/api/dealerships/${editingDealershipId}`;
+        const method = editingDealershipId === null ? "POST" : "PUT";
+
+        saveDealershipButton.disabled = true;
+        saveDealershipButton.textContent = "Saving…";
+
+        try {
+          const response = await fetch(endpoint, {
+            method,
+            body: requestData,
+          });
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(
+              responseError(payload, "The dealership could not be saved."),
+            );
+          }
+
+          hideDealershipForm();
+          await loadDealerships(payload.id);
+        } catch (error) {
+          dealershipFormError.textContent = error instanceof Error
+            ? error.message
+            : "The dealership could not be saved.";
+        } finally {
+          saveDealershipButton.disabled = false;
+          saveDealershipButton.textContent = "Save dealership";
+        }
+      });
+
       vehicleForm.addEventListener("input", (event) => {
         const field = event.target.dataset.stateField;
         if (field) {
@@ -766,6 +1367,12 @@
         requestData.append("dealer", JSON.stringify(dealer));
         requestData.append("price", document.querySelector("#price").value);
         requestData.append("extras", JSON.stringify(extras));
+        if (selectedDealership) {
+          requestData.append(
+            "dealership_id",
+            String(selectedDealership.id),
+          );
+        }
         if (dealerLogo.files[0]) {
           requestData.append("logo", dealerLogo.files[0]);
         }
@@ -1019,6 +1626,8 @@
           decodeButton.textContent = "Decode";
         }
       });
+
+      loadDealerships();
     </script>
   </body>
 </html>

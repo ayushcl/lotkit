@@ -6,3 +6,6 @@ __pycache__/
 .DS_Store
 runs/
 uploads/
+storage/
+lotkit.db
+*.db
