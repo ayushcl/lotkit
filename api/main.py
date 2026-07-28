@@ -25,7 +25,8 @@ from fastapi import (
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from starlette.requests import ClientDisconnect
 
 from api.auth import current_owner_id, get_or_create_default_owner
 from api.buyers_guide import render_buyers_guide
@@ -38,21 +39,25 @@ from api.config import (
 from api.db import connect_db, init_db
 from api.decode import VinDecodeError, decode_vin
 from api.delivery import (
+    DELIVERY_SESSION_COOKIE,
     DeliveryRunNotFoundError,
     RunHasNoArtifactsError,
     RunNotDeliveredError,
     RunNotReadyError,
-    begin_public_artifact_download,
+    begin_public_artifact_download_by_session,
     create_delivery_link,
+    exchange_delivery_secret,
     get_owner_delivery_status,
-    get_usable_delivery_link_by_token,
-    install_delivery_token_log_redaction,
+    get_usable_delivery_link_by_session,
+    install_delivery_secret_log_redaction,
     manifest_artifact_types,
+    public_bootstrap_response,
     public_security_headers,
     public_unavailable_response,
     reopen_delivered_run,
     resolve_manifest_artifact,
     revoke_owner_delivery_link,
+    validate_public_id_format,
 )
 from api.dealerships import (
     InvalidLogoError,
@@ -98,13 +103,29 @@ load_dotenv(BASE_DIR / ".env")
 RUNS_ROOT = get_settings().runs_dir
 LOGGER = logging.getLogger("uvicorn.error")
 REQUIRED_TABLES = frozenset(
-    {"users", "dealership_profiles", "runs", "delivery_links"}
+    {
+        "users",
+        "dealership_profiles",
+        "runs",
+        "delivery_links",
+        "delivery_sessions",
+    }
 )
 router = APIRouter()
 
 
 class VinRequest(BaseModel):
     vin: str
+
+
+class DeliveryExchangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    secret: str = Field(
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
 
 
 class BuyersGuideRequest(BaseModel):
@@ -440,7 +461,7 @@ def _delivery_error_response(exc: Exception) -> JSONResponse:
 
 
 def _public_delivery_page(
-    token: str,
+    public_id: str,
     link: Any,
     artifact_types: list[str],
 ) -> HTMLResponse:
@@ -459,7 +480,7 @@ def _public_delivery_page(
     ) or "Vehicle"
     vin = str(link["run_vin"] or "")
     vin_suffix = html.escape(vin[-4:], quote=True)
-    safe_token = html.escape(token, quote=True)
+    safe_public_id = html.escape(public_id, quote=True)
 
     labels = {
         "photos_zip": ("Vehicle photos", "Download vehicle photos"),
@@ -483,7 +504,7 @@ def _public_delivery_page(
             "<section class=\"file\">"
             f"<h2>{label}</h2>"
             f"{warning}"
-            f"<form method=\"post\" action=\"/d/{safe_token}/artifact/"
+            f"<form method=\"post\" action=\"/d/{safe_public_id}/artifact/"
             f"{artifact_type}\">"
             f"<button type=\"submit\">{button}</button>"
             "</form></section>"
@@ -492,7 +513,8 @@ def _public_delivery_page(
     page = (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<title>Vehicle files</title><style>"
+        "<title>Vehicle files</title>"
+        "<script src=\"/delivery-bootstrap.js\" defer></script><style>"
         "body{font-family:system-ui,sans-serif;background:#f6f7f9;"
         "color:#18202a;margin:0;padding:2rem 1rem;line-height:1.5}"
         "main{max-width:42rem;margin:auto;background:white;padding:2rem;"
@@ -1314,6 +1336,7 @@ def get_saved_run(
 def create_run_delivery_link(
     run_id: str,
     request: Request,
+    response: Response,
     owner_id: int = Depends(current_owner_id),
 ):
     connection = connect_db()
@@ -1325,11 +1348,19 @@ def create_run_delivery_link(
                 run_id,
                 RUNS_ROOT,
             )
+            public_base_url = (
+                request.app.state.settings.public_base_url.rstrip("/")
+            )
+            response.headers["Cache-Control"] = "no-store, private"
+            response.headers["Pragma"] = "no-cache"
             return {
-                **delivery,
-                "public_base_url": (
-                    request.app.state.settings.public_base_url
+                "share_url": (
+                    f"{public_base_url}/d/{delivery.public_id}"
+                    f"#{delivery.delivery_secret}"
                 ),
+                "expires_utc": delivery.expires_utc,
+                "state": "active",
+                "token_hint": delivery.token_hint,
             }
         except (
             DeliveryRunNotFoundError,
@@ -1459,39 +1490,144 @@ def download_run_artifact(
     return _artifact_response(owner_id, run_id, artifact_type)
 
 
-@router.get("/d/{token}")
-def public_delivery_page(token: str):
+@router.get("/delivery-bootstrap.js", include_in_schema=False)
+def delivery_bootstrap_script():
+    return FileResponse(
+        STATIC_DIR / "delivery-bootstrap.js",
+        media_type="application/javascript",
+        headers=public_security_headers(),
+    )
+
+
+async def _delivery_exchange_payload(
+    request: Request,
+    *,
+    maximum_bytes: int = 512,
+) -> DeliveryExchangeRequest | None:
+    """Read and validate a deliberately small JSON body without disclosure."""
+
+    content_type = request.headers.get("content-type", "")
+    if content_type.split(";", 1)[0].strip().lower() != "application/json":
+        return None
+
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            return None
+        if declared_length < 0 or declared_length > maximum_bytes:
+            return None
+
+    body = bytearray()
+    try:
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > maximum_bytes:
+                return None
+            body.extend(chunk)
+        return DeliveryExchangeRequest.model_validate_json(bytes(body))
+    except (
+        ClientDisconnect,
+        ValidationError,
+        ValueError,
+        UnicodeError,
+        RuntimeError,
+    ):
+        return None
+
+
+def _delivery_cookie_path(public_id: str) -> str:
+    return f"/d/{public_id}"
+
+
+def _delete_delivery_session_cookie(
+    response: Response,
+    request: Request,
+    public_id: str,
+) -> None:
+    if not validate_public_id_format(public_id):
+        return
+    response.delete_cookie(
+        DELIVERY_SESSION_COOKIE,
+        path=_delivery_cookie_path(public_id),
+        secure=request.app.state.settings.environment == "production",
+        httponly=True,
+        samesite="strict",
+    )
+
+
+@router.post("/d/{public_id}/exchange", include_in_schema=False)
+async def public_delivery_exchange(public_id: str, request: Request):
+    payload = await _delivery_exchange_payload(request)
+    if payload is None:
+        return public_unavailable_response()
+
     connection = connect_db()
     try:
-        link = get_usable_delivery_link_by_token(
+        session = exchange_delivery_secret(
             connection,
-            token,
+            public_id,
+            payload.secret,
+            RUNS_ROOT,
         )
-        if link is None:
-            return public_unavailable_response()
+    finally:
+        connection.close()
+
+    if session is None:
+        return public_unavailable_response()
+
+    response = Response(
+        status_code=204,
+        headers=public_security_headers(),
+    )
+    response.set_cookie(
+        key=DELIVERY_SESSION_COOKIE,
+        value=session.credential,
+        max_age=session.max_age,
+        path=_delivery_cookie_path(public_id),
+        secure=request.app.state.settings.environment == "production",
+        httponly=True,
+        samesite="strict",
+    )
+    return response
+
+
+@router.get("/d/{public_id}", include_in_schema=False)
+def public_delivery_page(public_id: str, request: Request):
+    session_credential = request.cookies.get(DELIVERY_SESSION_COOKIE)
+    if not session_credential:
+        return public_bootstrap_response()
+
+    connection = connect_db()
+    try:
+        opened_link = get_usable_delivery_link_by_session(
+            connection,
+            public_id,
+            session_credential,
+            RUNS_ROOT,
+            mark_opened=True,
+        )
+        if opened_link is None:
+            response = public_bootstrap_response()
+            _delete_delivery_session_cookie(response, request, public_id)
+            return response
 
         available_types = [
             artifact_type
-            for artifact_type in manifest_artifact_types(link)
+            for artifact_type in manifest_artifact_types(opened_link)
             if resolve_manifest_artifact(
-                link,
+                opened_link,
                 artifact_type,
                 RUNS_ROOT,
             )
             is not None
         ]
         if not available_types:
-            return public_unavailable_response()
-
-        opened_link = get_usable_delivery_link_by_token(
-            connection,
-            token,
-            mark_opened=True,
-        )
-        if opened_link is None:
-            return public_unavailable_response()
+            response = public_bootstrap_response()
+            _delete_delivery_session_cookie(response, request, public_id)
+            return response
         return _public_delivery_page(
-            token,
+            public_id,
             opened_link,
             available_types,
         )
@@ -1499,18 +1635,33 @@ def public_delivery_page(token: str):
         connection.close()
 
 
-@router.get("/d/{token}/artifact/{artifact_type}")
-def reject_public_get_download(token: str, artifact_type: str):
+@router.get(
+    "/d/{public_id}/artifact/{artifact_type}",
+    include_in_schema=False,
+)
+def reject_public_get_download(public_id: str, artifact_type: str):
     return public_unavailable_response()
 
 
-@router.post("/d/{token}/artifact/{artifact_type}")
-def public_artifact_download(token: str, artifact_type: str):
+@router.post(
+    "/d/{public_id}/artifact/{artifact_type}",
+    include_in_schema=False,
+)
+def public_artifact_download(
+    public_id: str,
+    artifact_type: str,
+    request: Request,
+):
+    session_credential = request.cookies.get(DELIVERY_SESSION_COOKIE)
+    if not session_credential:
+        return public_unavailable_response()
+
     connection = connect_db()
     try:
-        artifact = begin_public_artifact_download(
+        artifact = begin_public_artifact_download_by_session(
             connection,
-            token,
+            public_id,
+            session_credential,
             artifact_type,
             RUNS_ROOT,
         )
@@ -1567,7 +1718,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 runtime_settings.public_base_host,
                 runtime_settings.docs_enabled,
             )
-            install_delivery_token_log_redaction()
+            install_delivery_secret_log_redaction()
             ensure_persistent_directories(runtime_settings)
             init_db(runtime_settings.database_path)
             connection = connect_db(runtime_settings.database_path)

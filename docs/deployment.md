@@ -4,27 +4,26 @@
 
 Do not deploy this build publicly.
 
-Two separate blockers remain:
+Phase 5b must replace the implicit local-owner dependency with real
+authentication before any public deployment. The committed `render.yaml`
+has automatic deploys disabled; do not apply the Blueprint before that
+authentication work is complete.
 
-1. Phase 5b must replace the implicit local-owner dependency with real
-   authentication before any public deployment.
-2. The current public delivery URL contains its raw bearer credential in
-   the path: `/d/{token}`. Render's platform-edge HTTP request logs can record
-   the requested URL before traffic reaches LotKit, so the application's
-   Uvicorn path redaction cannot protect that platform log. This is a hard
-   deployment blocker for Phase 5a.1.
+Phase 5a.1 closes the former delivery-path logging blocker. New share URLs
+have the form:
 
-Phase 5a.1 must move the raw credential out of both the URL path and query
-string before Phase 5c deployment. The intended design is a fragment-based
-share URL. Browser code will deliberately exchange the fragment token in a
-POST body or authorization header, then remove the fragment from the browser
-URL. That transport redesign is deliberately not implemented in Phase 5a.
-The existing application-level Uvicorn redaction remains enabled and useful
-for local and application logs; it is not a defense against Render's
-platform-edge request logging.
+```text
+https://example.com/d/{public_id}#{delivery_secret}
+```
 
-The committed `render.yaml` has automatic deploys disabled. Do not apply the
-Blueprint until both blockers above are closed.
+Only the non-secret `public_id` is in the HTTP request path. URL fragments
+are handled by the browser and are never sent in HTTP requests, so edge and
+application request-path logs cannot receive the raw delivery secret through
+normal navigation. The browser removes the fragment before exchanging the
+secret in a bounded same-origin POST body for a short-lived HttpOnly cookie.
+LotKit does not log exchange bodies or cookie values. This design does not
+claim protection from a platform that independently records request bodies;
+verify platform logging settings before deployment.
 
 ## Production configuration
 
@@ -100,7 +99,7 @@ The configured endpoints are:
 Build the production image:
 
 ```bash
-docker build --tag lotkit:phase5a .
+docker build --tag lotkit:phase5a1 .
 ```
 
 Create an isolated data directory and start the container:
@@ -110,7 +109,7 @@ LOTKIT_DOCKER_DATA="$(mktemp -d)"
 chmod 770 "$LOTKIT_DOCKER_DATA"
 
 docker run --detach \
-  --name lotkit-phase5a \
+  --name lotkit-phase5a1 \
   --group-add "$(id -g)" \
   --publish 8000:8000 \
   --env LOTKIT_ENV=production \
@@ -119,7 +118,7 @@ docker run --detach \
   --env LOTKIT_TRUSTED_HOSTS=lotkit.invalid,localhost,127.0.0.1 \
   --env PORT=8000 \
   --mount "type=bind,src=$LOTKIT_DOCKER_DATA,dst=/var/data" \
-  lotkit:phase5a
+  lotkit:phase5a1
 ```
 
 The supplemental host group grants the non-root container user access to the
@@ -133,7 +132,7 @@ curl --fail http://localhost:8000/ready
 curl --fail http://localhost:8000/
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   http://localhost:8000/docs)" = 404
-docker exec lotkit-phase5a id
+docker exec lotkit-phase5a1 id
 find "$LOTKIT_DOCKER_DATA" -maxdepth 4 -print
 ```
 
@@ -147,11 +146,11 @@ restart with the same mount, and list it:
 curl --fail --request POST http://localhost:8000/api/dealerships \
   --form nickname=restart-check
 
-docker stop lotkit-phase5a
-docker rm lotkit-phase5a
+docker stop lotkit-phase5a1
+docker rm lotkit-phase5a1
 
 docker run --detach \
-  --name lotkit-phase5a \
+  --name lotkit-phase5a1 \
   --group-add "$(id -g)" \
   --publish 8000:8000 \
   --env LOTKIT_ENV=production \
@@ -160,7 +159,7 @@ docker run --detach \
   --env LOTKIT_TRUSTED_HOSTS=lotkit.invalid,localhost,127.0.0.1 \
   --env PORT=8000 \
   --mount "type=bind,src=$LOTKIT_DOCKER_DATA,dst=/var/data" \
-  lotkit:phase5a
+  lotkit:phase5a1
 
 curl --fail http://localhost:8000/api/dealerships
 ```
@@ -173,8 +172,8 @@ root or the development database into this production check.
 Stop and remove the test container when finished:
 
 ```bash
-docker stop lotkit-phase5a
-docker rm lotkit-phase5a
+docker stop lotkit-phase5a1
+docker rm lotkit-phase5a1
 ```
 
 The temporary data directory can then be removed after its contents have
@@ -185,14 +184,15 @@ been inspected.
 Inspect application logs with:
 
 ```bash
-docker logs lotkit-phase5a
+docker logs lotkit-phase5a1
 ```
 
-Do not paste or export request-log lines that might contain delivery URLs.
-The application-level Uvicorn filter redacts current `/d/{token}` paths, but
-always inspect output before sharing it. Render edge request logs remain
-unsafe for the current raw-token URL shape, as described in the deployment
-blocker above.
+Delivery request paths contain only a non-secret `public_id`, for example
+`GET /d/{public_id}` or `POST /d/{public_id}/exchange`. Fragments are never
+sent in HTTP. LotKit never logs the exchange body or delivery-session cookie,
+and its application log filter defensively redacts fragment secrets if a
+full share URL is accidentally logged. Always inspect output before sharing
+it, and do not enable request-body or cookie logging.
 
 Render disk snapshots are useful for operational recovery. Before any wider
 launch, add and rehearse a database-consistent SQLite backup/export

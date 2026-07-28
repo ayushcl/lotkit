@@ -6,6 +6,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -225,16 +226,47 @@ def _delivery_rows(run_id: str) -> list[sqlite3.Row]:
         connection.close()
 
 
+def _delivery_session_rows() -> list[sqlite3.Row]:
+    connection = connect_db()
+    try:
+        return connection.execute(
+            """
+            SELECT *
+            FROM delivery_sessions
+            ORDER BY id
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+
 def _create_link(client: TestClient, run_id: str):
     return client.post(f"/api/runs/{run_id}/delivery")
 
 
-def _token_from_response(response) -> str:
-    public_path = response.json()["public_path"]
-    assert public_path.startswith("/d/")
-    token = public_path.removeprefix("/d/")
-    assert "/" not in token
-    return token
+def _credentials_from_response(response) -> tuple[str, str]:
+    share_url = response.json()["share_url"]
+    parsed = urlsplit(share_url)
+    assert parsed.scheme in {"http", "https"}
+    assert parsed.netloc
+    assert parsed.query == ""
+    assert parsed.path.startswith("/d/")
+    public_id = parsed.path.removeprefix("/d/")
+    assert "/" not in public_id
+    assert re.fullmatch(r"[A-Za-z0-9_-]{20,64}", public_id)
+    assert re.fullmatch(r"[A-Za-z0-9_-]{40,64}", parsed.fragment)
+    return public_id, parsed.fragment
+
+
+def _exchange(
+    client: TestClient,
+    public_id: str,
+    delivery_secret: str,
+):
+    return client.post(
+        f"/d/{public_id}/exchange",
+        json={"secret": delivery_secret},
+    )
 
 
 def _manifest_path(entry: dict) -> Path:
@@ -257,15 +289,11 @@ def _assert_common_public_headers(response, *, html_response: bool) -> None:
         assert response.headers[name] == value
     if html_response:
         csp = response.headers["content-security-policy"]
-        assert "\n" not in csp
-        for directive in (
-            "default-src 'none'",
-            "style-src 'unsafe-inline'",
-            "form-action 'self'",
-            "base-uri 'none'",
-            "frame-ancestors 'none'",
-        ):
-            assert directive in csp
+        assert csp == (
+            "default-src 'none'; script-src 'self'; connect-src 'self'; "
+            "style-src 'unsafe-inline'; form-action 'self'; "
+            "base-uri 'none'; frame-ancestors 'none'"
+        )
 
 
 def _uuid_in_text(value: str) -> bool:
@@ -301,6 +329,7 @@ def test_init_db_creates_delivery_schema_indexes_and_cascading_foreign_keys(
             "id",
             "owner_id",
             "run_id",
+            "public_id",
             "token_hash",
             "token_hint",
             "artifact_manifest_json",
@@ -320,6 +349,9 @@ def test_init_db_creates_delivery_schema_indexes_and_cascading_foreign_keys(
         assert "delivery_links_token_hash_idx" in indexes
         assert "delivery_links_run_id_idx" in indexes
         assert "delivery_links_owner_id_idx" in indexes
+        public_id_index = indexes["delivery_links_public_id_idx"]
+        assert public_id_index["unique"] == 1
+        assert public_id_index["partial"] == 1
         partial = indexes["ux_delivery_links_one_unrevoked"]
         assert partial["unique"] == 1
         assert partial["partial"] == 1
@@ -332,6 +364,31 @@ def test_init_db_creates_delivery_schema_indexes_and_cascading_foreign_keys(
         }
         assert foreign_keys["owner_id"] == ("users", "id", "NO ACTION")
         assert foreign_keys["run_id"] == ("runs", "run_id", "CASCADE")
+
+        session_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(delivery_sessions)"
+            )
+        }
+        assert session_columns == {
+            "id",
+            "delivery_link_id",
+            "session_hash",
+            "created_utc",
+            "expires_utc",
+        }
+        session_indexes = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA index_list(delivery_sessions)"
+            )
+        }
+        assert "delivery_sessions_session_hash_idx" in session_indexes
+        assert (
+            "delivery_sessions_delivery_link_id_idx"
+            in session_indexes
+        )
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     finally:
         connection.close()
@@ -348,29 +405,41 @@ def test_create_link_uses_high_entropy_hashed_token_and_returns_raw_once(
 
     assert response.status_code == 201
     assert set(response.json()) == {
-        "public_path",
-        "public_base_url",
+        "share_url",
         "expires_utc",
         "state",
         "token_hint",
     }
-    assert response.json()["public_base_url"] == "http://127.0.0.1:8000"
+    assert response.json()["share_url"].startswith(
+        "http://127.0.0.1:8000/d/"
+    )
+    assert response.headers["cache-control"] == "no-store, private"
+    assert response.headers["pragma"] == "no-cache"
     assert response.json()["state"] == "active"
-    token = _token_from_response(response)
-    assert re.fullmatch(r"[A-Za-z0-9_-]{40,64}", token)
-    assert token != run_id
-    assert token != VIN
-    assert VIN not in token
-    assert run_id not in token
-    assert not re.search(r"\d{8}T\d{6}", token)
+    public_id, delivery_secret = _credentials_from_response(response)
+    assert delivery_secret != run_id
+    assert delivery_secret != VIN
+    assert VIN not in delivery_secret
+    assert run_id not in delivery_secret
+    assert not re.search(r"\d{8}T\d{6}", delivery_secret)
+    assert public_id != run_id
+    assert public_id != VIN
+    assert VIN not in public_id
+    assert run_id not in public_id
+    parsed_share_url = urlsplit(response.json()["share_url"])
+    assert delivery_secret not in parsed_share_url.path
+    assert delivery_secret not in parsed_share_url.query
 
     rows = _delivery_rows(run_id)
     assert len(rows) == 1
     link = rows[0]
-    assert link["token_hash"] == hashlib.sha256(token.encode()).hexdigest()
-    assert link["token_hint"] == token[-6:]
-    assert token not in tuple(str(value) for value in link)
-    assert response.json()["token_hint"] == token[-6:]
+    assert link["public_id"] == public_id
+    assert link["token_hash"] == hashlib.sha256(
+        delivery_secret.encode()
+    ).hexdigest()
+    assert link["token_hint"] == delivery_secret[-6:]
+    assert delivery_secret not in tuple(str(value) for value in link)
+    assert response.json()["token_hint"] == delivery_secret[-6:]
     created = datetime.fromisoformat(link["created_utc"])
     expires = datetime.fromisoformat(link["expires_utc"])
     assert timedelta(days=29, hours=23, minutes=59) < expires - created
@@ -378,20 +447,35 @@ def test_create_link_uses_high_entropy_hashed_token_and_returns_raw_once(
     assert _run_row(run_id)["status"] == "ready"
 
     database_bytes = isolated_persistence["database_path"].read_bytes()
-    assert token.encode() not in database_bytes
-    assert response.json()["public_path"].encode() not in database_bytes
+    assert delivery_secret.encode() not in database_bytes
+    assert response.json()["share_url"].encode() not in database_bytes
 
-    public = client.get(response.json()["public_path"])
+    bootstrap = client.get(f"/d/{public_id}")
+    assert bootstrap.status_code == 200
+    assert "Opening secure delivery" in bootstrap.text
+    assert VIN not in bootstrap.text
+    assert delivery_secret not in bootstrap.text
+
+    exchanged = _exchange(client, public_id, delivery_secret)
+    assert exchanged.status_code == 204
+    public = client.get(f"/d/{public_id}")
     assert public.status_code == 200
+    assert "Vehicle files" in public.text
     owner_status = client.get(f"/api/runs/{run_id}/delivery")
     assert owner_status.status_code == 200
     serialized_status = json.dumps(owner_status.json())
-    assert token not in serialized_status
+    assert delivery_secret not in serialized_status
     assert link["token_hash"] not in serialized_status
     assert "token_hash" not in owner_status.json()
     assert "artifact_manifest" not in serialized_status
     assert "relative_path" not in serialized_status
-    assert owner_status.json()["token_hint"] == token[-6:]
+    assert owner_status.json()["token_hint"] == delivery_secret[-6:]
+
+    owner_page = client.get("/")
+    assert "Original share link (shown once)" in owner_page.text
+    assert "part after #." in owner_page.text
+    assert "copying the cleaned address afterward" in owner_page.text
+    assert "if it is lost, create a replacement" in owner_page.text
 
 
 def test_link_eligibility_no_artifacts_and_owner_none_state(
@@ -429,12 +513,14 @@ def test_replacement_manual_revocation_and_partial_unique_index(
     run_id, _ = _make_run_with_artifacts()
     first = _create_link(client, run_id)
     assert first.status_code == 201
-    first_token = _token_from_response(first)
+    first_public_id, first_secret = _credentials_from_response(first)
+    assert _exchange(client, first_public_id, first_secret).status_code == 204
 
     second = _create_link(client, run_id)
     assert second.status_code == 201
-    second_token = _token_from_response(second)
-    assert second_token != first_token
+    second_public_id, second_secret = _credentials_from_response(second)
+    assert second_public_id != first_public_id
+    assert second_secret != first_secret
     assert _run_row(run_id)["status"] == "ready"
 
     rows = _delivery_rows(run_id)
@@ -443,10 +529,21 @@ def test_replacement_manual_revocation_and_partial_unique_index(
     assert rows[0]["revocation_reason"] == "replaced"
     assert rows[1]["revoked_utc"] is None
     assert sum(row["revoked_utc"] is None for row in rows) == 1
-    first_unavailable = client.get(f"/d/{first_token}")
-    assert first_unavailable.status_code == 404
-    assert GENERIC_UNAVAILABLE_COPY in first_unavailable.text
-    assert client.get(f"/d/{second_token}").status_code == 200
+    first_unavailable = client.get(f"/d/{first_public_id}")
+    assert first_unavailable.status_code == 200
+    assert "Opening secure delivery" in first_unavailable.text
+    assert VIN not in first_unavailable.text
+    old_session_download = client.post(
+        f"/d/{first_public_id}/artifact/sticker_pdf"
+    )
+    assert old_session_download.status_code == 404
+    assert GENERIC_UNAVAILABLE_COPY in old_session_download.text
+    assert _exchange(
+        client,
+        second_public_id,
+        second_secret,
+    ).status_code == 204
+    assert "Vehicle files" in client.get(f"/d/{second_public_id}").text
 
     connection = connect_db()
     try:
@@ -456,17 +553,19 @@ def test_replacement_manual_revocation_and_partial_unique_index(
                 INSERT INTO delivery_links (
                     owner_id,
                     run_id,
+                    public_id,
                     token_hash,
                     token_hint,
                     artifact_manifest_json,
                     created_utc,
                     expires_utc
                 )
-                VALUES (?, ?, ?, ?, '{}', ?, ?)
+                VALUES (?, ?, ?, ?, ?, '{}', ?, ?)
                 """,
                 (
                     _owner_id(),
                     run_id,
+                    "C" * 22,
                     "f" * 64,
                     "ffffff",
                     "2026-07-01T00:00:00+00:00",
@@ -483,7 +582,12 @@ def test_replacement_manual_revocation_and_partial_unique_index(
     latest = _delivery_rows(run_id)[-1]
     assert latest["revoked_utc"] is not None
     assert latest["revocation_reason"] == "manual"
-    assert client.get(f"/d/{second_token}").status_code == 404
+    revoked_page = client.get(f"/d/{second_public_id}")
+    assert revoked_page.status_code == 200
+    assert VIN not in revoked_page.text
+    assert client.post(
+        f"/d/{second_public_id}/artifact/sticker_pdf"
+    ).status_code == 404
     assert client.post(f"/api/runs/{run_id}/delivery/revoke").status_code == 200
     owner_status = client.get(f"/api/runs/{run_id}/delivery").json()
     assert owner_status["state"] == "revoked"
@@ -495,8 +599,9 @@ def test_expiry_is_derived_from_expires_utc_on_every_request(
 ) -> None:
     run_id, _ = _make_run_with_artifacts()
     created = _create_link(client, run_id)
-    token = _token_from_response(created)
-    assert client.get(f"/d/{token}").status_code == 200
+    public_id, delivery_secret = _credentials_from_response(created)
+    assert _exchange(client, public_id, delivery_secret).status_code == 204
+    assert "VIN ending" in client.get(f"/d/{public_id}").text
 
     expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
     connection = connect_db()
@@ -513,9 +618,15 @@ def test_expiry_is_derived_from_expires_utc_on_every_request(
     finally:
         connection.close()
 
-    response = client.get(f"/d/{token}")
-    assert response.status_code == 404
-    assert GENERIC_UNAVAILABLE_COPY in response.text
+    response = client.get(f"/d/{public_id}")
+    assert response.status_code == 200
+    assert "Opening secure delivery" in response.text
+    assert VIN not in response.text
+    unavailable_download = client.post(
+        f"/d/{public_id}/artifact/sticker_pdf"
+    )
+    assert unavailable_download.status_code == 404
+    assert GENERIC_UNAVAILABLE_COPY in unavailable_download.text
     status = client.get(f"/api/runs/{run_id}/delivery").json()
     assert status["state"] == "expired"
     assert status["revoked_utc"] is None
@@ -536,10 +647,11 @@ def test_public_page_is_minimal_escaped_masked_and_manifest_limited(
         vehicle=malicious_vehicle,
     )
     created = _create_link(client, run_id)
-    token = _token_from_response(created)
+    public_id, delivery_secret = _credentials_from_response(created)
     token_hash = _delivery_rows(run_id)[0]["token_hash"]
+    assert _exchange(client, public_id, delivery_secret).status_code == 204
 
-    page = client.get(f"/d/{token}")
+    page = client.get(f"/d/{public_id}")
 
     assert page.status_code == 200
     assert page.headers["content-type"].startswith("text/html")
@@ -581,14 +693,14 @@ def test_public_page_is_minimal_escaped_masked_and_manifest_limited(
     ):
         assert internal_key not in page.text
 
-    # The bearer is necessarily present in the deliberate form actions, but
-    # must not be rendered as visible page text or elsewhere as metadata.
+    # Form actions contain only the non-secret public identifier.
     visible_text = re.sub(r"<[^>]+>", "", page.text)
-    assert token not in visible_text
-    assert page.text.count(f"/d/{token}/artifact/") == 2
-    assert f"/d/{token}/artifact/sticker_pdf" in page.text
-    assert f"/d/{token}/artifact/buyers_guide_pdf" in page.text
-    assert f"/d/{token}/artifact/photos_zip" not in page.text
+    assert delivery_secret not in visible_text
+    assert delivery_secret not in page.text
+    assert page.text.count(f"/d/{public_id}/artifact/") == 2
+    assert f"/d/{public_id}/artifact/sticker_pdf" in page.text
+    assert f"/d/{public_id}/artifact/buyers_guide_pdf" in page.text
+    assert f"/d/{public_id}/artifact/photos_zip" not in page.text
     assert 'method="post"' in page.text.lower()
     manifest = json.loads(
         _delivery_rows(run_id)[0]["artifact_manifest_json"]
@@ -603,7 +715,7 @@ def test_public_page_is_minimal_escaped_masked_and_manifest_limited(
     )
     assert buyers_guide_warning in page.text
     buyers_guide_form = (
-        f'<form method="post" action="/d/{token}/artifact/'
+        f'<form method="post" action="/d/{public_id}/artifact/'
         'buyers_guide_pdf">'
     )
     assert (
@@ -616,7 +728,9 @@ def test_public_page_is_minimal_escaped_masked_and_manifest_limited(
     ) in page.text
 
     lowered = page.text.lower()
-    assert "<script" not in lowered
+    assert lowered.count("<script") == 1
+    assert '<script src="/delivery-bootstrap.js" defer></script>' in lowered
+    assert re.search(r"<script(?![^>]*\bsrc=)", lowered) is None
     assert "<img" not in lowered
     assert "<link" not in lowered
     assert "http://" not in lowered
@@ -676,22 +790,37 @@ def test_public_unavailable_cases_are_byte_identical_and_non_disclosing(
     client: TestClient,
     isolated_persistence,
 ) -> None:
-    malformed = client.get("/d/not!a-valid-token")
-    nonexistent = client.get("/d/" + "A" * 43)
-
     revoked_run, _ = _make_run_with_artifacts()
-    revoked_token = _token_from_response(_create_link(client, revoked_run))
+    revoked_public_id, revoked_secret = _credentials_from_response(
+        _create_link(client, revoked_run)
+    )
+    assert _exchange(
+        client,
+        revoked_public_id,
+        revoked_secret,
+    ).status_code == 204
     assert (
         client.post(f"/api/runs/{revoked_run}/delivery/revoke").status_code
         == 200
     )
-    revoked = client.get(f"/d/{revoked_token}")
+    revoked_exchange = _exchange(
+        client,
+        revoked_public_id,
+        revoked_secret,
+    )
     revoked_post = client.post(
-        f"/d/{revoked_token}/artifact/sticker_pdf"
+        f"/d/{revoked_public_id}/artifact/sticker_pdf"
     )
 
     expired_run, _ = _make_run_with_artifacts()
-    expired_token = _token_from_response(_create_link(client, expired_run))
+    expired_public_id, expired_secret = _credentials_from_response(
+        _create_link(client, expired_run)
+    )
+    assert _exchange(
+        client,
+        expired_public_id,
+        expired_secret,
+    ).status_code == 204
     connection = connect_db()
     try:
         connection.execute(
@@ -708,21 +837,27 @@ def test_public_unavailable_cases_are_byte_identical_and_non_disclosing(
         connection.commit()
     finally:
         connection.close()
-    expired = client.get(f"/d/{expired_token}")
+    expired_exchange = _exchange(
+        client,
+        expired_public_id,
+        expired_secret,
+    )
     expired_post = client.post(
-        f"/d/{expired_token}/artifact/sticker_pdf"
+        f"/d/{expired_public_id}/artifact/sticker_pdf"
     )
 
     active_run, _ = _make_run_with_artifacts()
-    active_token = _token_from_response(_create_link(client, active_run))
+    active_public_id, active_secret = _credentials_from_response(
+        _create_link(client, active_run)
+    )
     nonallowlisted = client.post(
-        f"/d/{active_token}/artifact/run_report"
+        f"/d/{active_public_id}/artifact/run_report"
     )
     absent = client.post(
-        f"/d/{active_token}/artifact/buyers_guide_pdf"
+        f"/d/{active_public_id}/artifact/buyers_guide_pdf"
     )
     get_artifact = client.get(
-        f"/d/{active_token}/artifact/sticker_pdf"
+        f"/d/{active_public_id}/artifact/sticker_pdf"
     )
     malformed_post = client.post(
         "/d/not!a-valid-token/artifact/sticker_pdf"
@@ -732,19 +867,31 @@ def test_public_unavailable_cases_are_byte_identical_and_non_disclosing(
     )
 
     missing_run, _ = _make_run_with_artifacts()
-    missing_token = _token_from_response(_create_link(client, missing_run))
+    missing_public_id, missing_secret = _credentials_from_response(
+        _create_link(client, missing_run)
+    )
+    assert _exchange(
+        client,
+        missing_public_id,
+        missing_secret,
+    ).status_code == 204
     missing_manifest = json.loads(
         _delivery_rows(missing_run)[0]["artifact_manifest_json"]
     )
     _manifest_path(missing_manifest["sticker_pdf"]).unlink()
     missing_file = client.post(
-        f"/d/{missing_token}/artifact/sticker_pdf"
+        f"/d/{missing_public_id}/artifact/sticker_pdf"
     )
 
     traversal_run, _ = _make_run_with_artifacts()
-    traversal_token = _token_from_response(
+    traversal_public_id, traversal_secret = _credentials_from_response(
         _create_link(client, traversal_run)
     )
+    assert _exchange(
+        client,
+        traversal_public_id,
+        traversal_secret,
+    ).status_code == 204
     sentinel = isolated_persistence["database_path"].parent / "sentinel.pdf"
     sentinel.write_bytes(b"must never be public")
     connection = connect_db()
@@ -770,16 +917,133 @@ def test_public_unavailable_cases_are_byte_identical_and_non_disclosing(
         connection.commit()
     finally:
         connection.close()
+    traversal_exchange = _exchange(
+        client,
+        traversal_public_id,
+        traversal_secret,
+    )
     traversal = client.post(
-        f"/d/{traversal_token}/artifact/sticker_pdf"
+        f"/d/{traversal_public_id}/artifact/sticker_pdf"
     )
 
-    responses = [
-        malformed,
-        nonexistent,
-        revoked,
+    empty_manifest_run, _ = _make_run_with_artifacts()
+    empty_public_id, empty_secret = _credentials_from_response(
+        _create_link(client, empty_manifest_run)
+    )
+    connection = connect_db()
+    try:
+        connection.execute(
+            """
+            UPDATE delivery_links
+            SET artifact_manifest_json = '{}'
+            WHERE run_id = ?
+            """,
+            (empty_manifest_run,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    empty_manifest_exchange = _exchange(
+        client,
+        empty_public_id,
+        empty_secret,
+    )
+
+    overlong_manifest_run, _ = _make_run_with_artifacts()
+    overlong_public_id, overlong_secret = _credentials_from_response(
+        _create_link(client, overlong_manifest_run)
+    )
+    connection = connect_db()
+    try:
+        row = connection.execute(
+            """
+            SELECT id, artifact_manifest_json
+            FROM delivery_links
+            WHERE run_id = ?
+            """,
+            (overlong_manifest_run,),
+        ).fetchone()
+        overlong_manifest = json.loads(row["artifact_manifest_json"])
+        overlong_manifest["sticker_pdf"]["relative_path"] = (
+            f"{overlong_manifest_run}/{'x' * 300}.pdf"
+        )
+        connection.execute(
+            """
+            UPDATE delivery_links
+            SET artifact_manifest_json = ?
+            WHERE id = ?
+            """,
+            (json.dumps(overlong_manifest), row["id"]),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    overlong_manifest_exchange = _exchange(
+        client,
+        overlong_public_id,
+        overlong_secret,
+    )
+
+    invalid_unicode_run, _ = _make_run_with_artifacts()
+    invalid_unicode_public_id, invalid_unicode_secret = (
+        _credentials_from_response(
+            _create_link(client, invalid_unicode_run)
+        )
+    )
+    connection = connect_db()
+    try:
+        row = connection.execute(
+            """
+            SELECT id, artifact_manifest_json
+            FROM delivery_links
+            WHERE run_id = ?
+            """,
+            (invalid_unicode_run,),
+        ).fetchone()
+        invalid_unicode_manifest = json.loads(row["artifact_manifest_json"])
+        invalid_unicode_manifest["sticker_pdf"]["relative_path"] = (
+            f"{invalid_unicode_run}/\ud800.pdf"
+        )
+        connection.execute(
+            """
+            UPDATE delivery_links
+            SET artifact_manifest_json = ?
+            WHERE id = ?
+            """,
+            (json.dumps(invalid_unicode_manifest), row["id"]),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    invalid_unicode_exchange = _exchange(
+        client,
+        invalid_unicode_public_id,
+        invalid_unicode_secret,
+    )
+
+    bootstrap_responses = [
+        client.get("/d/not!a-valid-public-id"),
+        client.get("/d/" + "A" * 22),
+        client.get(f"/d/{active_public_id}"),
+        client.get(f"/d/{revoked_public_id}"),
+        client.get(f"/d/{expired_public_id}"),
+    ]
+    bootstrap = bootstrap_responses[0]
+    assert bootstrap.status_code == 200
+    assert "Opening secure delivery" in bootstrap.text
+    assert GENERIC_UNAVAILABLE_COPY in bootstrap.text
+    bootstrap_headers = _public_header_subset(bootstrap)
+    for response in bootstrap_responses:
+        assert response.status_code == 200
+        assert response.content == bootstrap.content
+        assert _public_header_subset(response) == bootstrap_headers
+        _assert_common_public_headers(response, html_response=True)
+        assert VIN.encode() not in response.content
+
+    generic_responses = [
+        revoked_exchange,
         revoked_post,
-        expired,
+        expired_exchange,
         expired_post,
         nonallowlisted,
         absent,
@@ -787,13 +1051,29 @@ def test_public_unavailable_cases_are_byte_identical_and_non_disclosing(
         malformed_post,
         nonexistent_post,
         missing_file,
+        traversal_exchange,
         traversal,
+        empty_manifest_exchange,
+        overlong_manifest_exchange,
+        invalid_unicode_exchange,
+        _exchange(client, "A" * 22, "B" * 43),
+        _exchange(client, active_public_id, "B" * 43),
+        client.post(
+            f"/d/{active_public_id}/exchange",
+            content=b"{}",
+            headers={"content-type": "application/json"},
+        ),
+        client.post(
+            f"/d/{active_public_id}/exchange",
+            content=b"x" * 513,
+            headers={"content-type": "application/json"},
+        ),
     ]
-    baseline = responses[0]
+    baseline = generic_responses[0]
     assert baseline.status_code == 404
     assert GENERIC_UNAVAILABLE_COPY in baseline.text
     baseline_headers = _public_header_subset(baseline)
-    for response in responses:
+    for response in generic_responses:
         assert response.status_code == 404
         assert response.content == baseline.content
         assert response.headers["content-type"] == baseline.headers["content-type"]
@@ -812,6 +1092,7 @@ def test_public_unavailable_cases_are_byte_identical_and_non_disclosing(
     assert sentinel.read_bytes() == b"must never be public"
     assert _run_row(active_run)["status"] == "ready"
     assert _delivery_rows(active_run)[0]["first_download_started_utc"] is None
+    assert active_secret.encode() not in baseline.content
 
 
 def test_public_download_requires_post_marks_delivered_once_and_is_safe(
@@ -819,10 +1100,19 @@ def test_public_download_requires_post_marks_delivered_once_and_is_safe(
 ) -> None:
     run_id, _ = _make_run_with_artifacts()
     created = _create_link(client, run_id)
-    token = _token_from_response(created)
-    artifact_url = f"/d/{token}/artifact/sticker_pdf"
+    public_id, delivery_secret = _credentials_from_response(created)
+    artifact_url = f"/d/{public_id}/artifact/sticker_pdf"
 
-    page = client.get(f"/d/{token}")
+    bootstrap = client.get(f"/d/{public_id}")
+    assert bootstrap.status_code == 200
+    assert "Opening secure delivery" in bootstrap.text
+    assert _delivery_rows(run_id)[0]["first_opened_utc"] is None
+    assert _exchange(client, public_id, delivery_secret).status_code == 204
+    assert _run_row(run_id)["status"] == "ready"
+    assert _delivery_rows(run_id)[0]["first_opened_utc"] is None
+    assert _delivery_rows(run_id)[0]["first_download_started_utc"] is None
+
+    page = client.get(f"/d/{public_id}")
     assert page.status_code == 200
     assert _run_row(run_id)["status"] == "ready"
     opened_link = _delivery_rows(run_id)[0]
@@ -865,7 +1155,8 @@ def test_public_download_uses_manifest_not_latest_run_outputs(
 ) -> None:
     run_id, outputs = _make_run_with_artifacts()
     created = _create_link(client, run_id)
-    token = _token_from_response(created)
+    public_id, delivery_secret = _credentials_from_response(created)
+    assert _exchange(client, public_id, delivery_secret).status_code == 204
     manifest = json.loads(
         _delivery_rows(run_id)[0]["artifact_manifest_json"]
     )
@@ -888,7 +1179,7 @@ def test_public_download_uses_manifest_not_latest_run_outputs(
     finally:
         connection.close()
 
-    public = client.post(f"/d/{token}/artifact/sticker_pdf")
+    public = client.post(f"/d/{public_id}/artifact/sticker_pdf")
     assert public.status_code == 200
     assert public.content == STICKER_BYTES
     assert public.content != NEW_STICKER_BYTES
@@ -990,7 +1281,8 @@ def test_successful_regeneration_versions_output_revokes_link_and_snapshot(
         artifact_types=(artifact_type,)
     )
     created = _create_link(client, run_id)
-    token = _token_from_response(created)
+    public_id, delivery_secret = _credentials_from_response(created)
+    assert _exchange(client, public_id, delivery_secret).status_code == 204
     original_manifest = json.loads(
         _delivery_rows(run_id)[0]["artifact_manifest_json"]
     )
@@ -1022,7 +1314,13 @@ def test_successful_regeneration_versions_output_revokes_link_and_snapshot(
     link = _delivery_rows(run_id)[0]
     assert link["revoked_utc"] is not None
     assert link["revocation_reason"] == "outputs_changed"
-    assert client.get(f"/d/{token}").status_code == 404
+    revoked_page = client.get(f"/d/{public_id}")
+    assert revoked_page.status_code == 200
+    assert "Opening secure delivery" in revoked_page.text
+    assert VIN not in revoked_page.text
+    assert client.post(
+        f"/d/{public_id}/artifact/{artifact_type}"
+    ).status_code == 404
     owner_status = client.get(f"/api/runs/{run_id}/delivery").json()
     assert owner_status["state"] == "revoked"
     assert owner_status["revocation_reason"] == "outputs_changed"
@@ -1033,7 +1331,10 @@ def test_failed_generation_does_not_revoke_or_mutate_ready_run(
     monkeypatch,
 ) -> None:
     run_id, _ = _make_run_with_artifacts()
-    token = _token_from_response(_create_link(client, run_id))
+    public_id, delivery_secret = _credentials_from_response(
+        _create_link(client, run_id)
+    )
+    assert _exchange(client, public_id, delivery_secret).status_code == 204
     before_run = dict(_run_row(run_id))
     before_link = dict(_delivery_rows(run_id)[0])
     before_files = {
@@ -1064,7 +1365,9 @@ def test_failed_generation_does_not_revoke_or_mutate_ready_run(
     assert after_link == before_link
     assert after_link["revoked_utc"] is None
     assert len(_delivery_rows(run_id)) == 1
-    assert client.get(f"/d/{token}").status_code == 200
+    still_active = client.get(f"/d/{public_id}")
+    assert still_active.status_code == 200
+    assert "VIN ending" in still_active.text
     after_files = {
         path.name: path.read_bytes()
         for path in (api.main.RUNS_ROOT / run_id).iterdir()
@@ -1080,8 +1383,11 @@ def test_delivered_run_is_locked_until_explicit_reopen(
     run_id, original_outputs = _make_run_with_artifacts(
         artifact_types=("photos_zip", "sticker_pdf", "buyers_guide_pdf")
     )
-    token = _token_from_response(_create_link(client, run_id))
-    delivered = client.post(f"/d/{token}/artifact/sticker_pdf")
+    public_id, delivery_secret = _credentials_from_response(
+        _create_link(client, run_id)
+    )
+    assert _exchange(client, public_id, delivery_secret).status_code == 204
+    delivered = client.post(f"/d/{public_id}/artifact/sticker_pdf")
     assert delivered.status_code == 200
     assert _run_row(run_id)["status"] == "delivered"
     snapshot_before = _run_row(run_id)["vehicle_json"]
@@ -1139,7 +1445,13 @@ def test_delivered_run_is_locked_until_explicit_reopen(
     link = _delivery_rows(run_id)[0]
     assert link["revoked_utc"] is not None
     assert link["revocation_reason"] == "reopened"
-    assert client.get(f"/d/{token}").status_code == 404
+    reopened_page = client.get(f"/d/{public_id}")
+    assert reopened_page.status_code == 200
+    assert "Opening secure delivery" in reopened_page.text
+    assert VIN not in reopened_page.text
+    assert client.post(
+        f"/d/{public_id}/artifact/sticker_pdf"
+    ).status_code == 404
 
     monkeypatch.setattr(
         api.main,
@@ -1193,20 +1505,24 @@ def test_delivery_owner_endpoints_are_scoped_and_public_routes_are_not(
     assert _run_row(other_run_id)["status"] == "delivered"
 
     public_run_id, _ = _make_run_with_artifacts()
-    token = _token_from_response(_create_link(client, public_run_id))
+    public_id, delivery_secret = _credentials_from_response(
+        _create_link(client, public_run_id)
+    )
 
     def fail_if_owner_dependency_is_used():
         raise AssertionError("public route invoked current_owner_id")
 
     app.dependency_overrides[current_owner_id] = fail_if_owner_dependency_is_used
     try:
-        public_page = client.get(f"/d/{token}")
+        exchanged = _exchange(client, public_id, delivery_secret)
+        public_page = client.get(f"/d/{public_id}")
         public_download = client.post(
-            f"/d/{token}/artifact/sticker_pdf"
+            f"/d/{public_id}/artifact/sticker_pdf"
         )
     finally:
         app.dependency_overrides.pop(current_owner_id, None)
 
+    assert exchanged.status_code == 204
     assert public_page.status_code == 200
     assert public_download.status_code == 200
     assert public_download.content == STICKER_BYTES
@@ -1221,12 +1537,12 @@ def test_token_hash_collision_is_retried_without_reusing_credential(
 
     first_run, _ = _make_run_with_artifacts()
     first = _create_link(client, first_run)
-    first_token = _token_from_response(first)
+    _first_public_id, first_secret = _credentials_from_response(first)
 
     second_run, _ = _make_run_with_artifacts(vin=SECOND_VIN)
-    replacement_token = "B" * 43
-    assert replacement_token != first_token
-    candidates = iter((first_token, replacement_token))
+    replacement_secret = "B" * 43
+    assert replacement_secret != first_secret
+    candidates = iter((first_secret, replacement_secret))
     monkeypatch.setattr(
         api.delivery,
         "generate_delivery_token",
@@ -1236,23 +1552,29 @@ def test_token_hash_collision_is_retried_without_reusing_credential(
     second = _create_link(client, second_run)
 
     assert second.status_code == 201
-    assert _token_from_response(second) == replacement_token
+    _second_public_id, second_secret = _credentials_from_response(second)
+    assert second_secret == replacement_secret
     second_row = _delivery_rows(second_run)[0]
     assert second_row["token_hash"] == hashlib.sha256(
-        replacement_token.encode()
+        replacement_secret.encode()
     ).hexdigest()
     assert len(_delivery_rows(first_run)) == 1
 
 
-def test_delivery_token_helpers_and_log_redaction(
+def test_delivery_secret_helpers_and_defensive_fragment_log_redaction(
     client: TestClient,
+    monkeypatch,
 ) -> None:
+    import api.delivery
+
     from api.delivery import (
-        RedactDeliveryTokenFilter,
+        RedactDeliverySecretFilter,
         generate_delivery_token,
+        generate_public_id,
         hash_delivery_token,
-        redact_delivery_tokens,
+        redact_delivery_secrets,
         validate_delivery_token_format,
+        validate_public_id_format,
     )
 
     tokens = {generate_delivery_token() for _ in range(64)}
@@ -1264,25 +1586,48 @@ def test_delivery_token_helpers_and_log_redaction(
     token = next(iter(tokens))
     token_hash = hash_delivery_token(token)
     assert token_hash == hashlib.sha256(token.encode()).hexdigest()
+    public_id = generate_public_id()
+    assert validate_public_id_format(public_id)
+    assert len(public_id) == 22
+    assert not validate_public_id_format("A" * 21)
+    assert not validate_public_id_format("A" * 23)
 
-    plain_path = f"/d/{token}/artifact/sticker_pdf"
-    assert redact_delivery_tokens(plain_path) == (
-        "/d/[REDACTED]/artifact/sticker_pdf"
+    requested_random_bytes: list[int] = []
+
+    def deterministic_urlsafe(byte_count: int) -> str:
+        requested_random_bytes.append(byte_count)
+        return "P" * 22
+
+    monkeypatch.setattr(
+        api.delivery.secrets,
+        "token_urlsafe",
+        deterministic_urlsafe,
     )
-    assert redact_delivery_tokens("/api/runs") == "/api/runs"
+    assert generate_public_id() == "P" * 22
+    assert requested_random_bytes == [16]
 
-    redaction_filter = RedactDeliveryTokenFilter()
+    plain_path = f"/d/{public_id}/artifact/sticker_pdf"
+    assert redact_delivery_secrets(plain_path) == plain_path
+    share_url = f"https://lotkit.example/d/{public_id}#{token}"
+    assert redact_delivery_secrets(share_url) == (
+        f"https://lotkit.example/d/{public_id}#[REDACTED]"
+    )
+    assert redact_delivery_secrets(f"/d/{token}") == "/d/[REDACTED]"
+    assert redact_delivery_secrets("/api/runs") == "/api/runs"
+
+    redaction_filter = RedactDeliverySecretFilter()
     plain_record = logging.LogRecord(
         "lotkit",
         logging.INFO,
         __file__,
         1,
-        f"serving {plain_path}",
+        f"owner accidentally logged {share_url}",
         (),
         None,
     )
     assert redaction_filter.filter(plain_record) is True
     assert token not in plain_record.getMessage()
+    assert public_id in plain_record.getMessage()
     assert "[REDACTED]" in plain_record.getMessage()
 
     structured_record = logging.LogRecord(
@@ -1303,10 +1648,9 @@ def test_delivery_token_helpers_and_log_redaction(
     structured_record.path = plain_path
     structured_record.scope = {"path": plain_path}
     assert redaction_filter.filter(structured_record) is True
-    assert token not in structured_record.getMessage()
-    assert "[REDACTED]" in structured_record.getMessage()
-    assert token not in structured_record.path
-    assert token not in structured_record.scope["path"]
+    assert public_id in structured_record.getMessage()
+    assert structured_record.path == plain_path
+    assert structured_record.scope["path"] == plain_path
     assert token_hash not in structured_record.getMessage()
 
     ordinary_record = logging.LogRecord(
@@ -1323,9 +1667,347 @@ def test_delivery_token_helpers_and_log_redaction(
 
     # Lifespan startup installs the filter on Uvicorn's access logger.
     assert any(
-        isinstance(item, RedactDeliveryTokenFilter)
+        isinstance(item, RedactDeliverySecretFilter)
         for item in logging.getLogger("uvicorn.access").filters
     )
+
+
+def test_fragment_bootstrap_script_cleans_before_body_exchange_and_fails_closed(
+    client: TestClient,
+) -> None:
+    run_id, _ = _make_run_with_artifacts()
+    created = _create_link(client, run_id)
+    public_id, delivery_secret = _credentials_from_response(created)
+
+    bootstrap = client.get(f"/d/{public_id}")
+    assert bootstrap.status_code == 200
+    _assert_common_public_headers(bootstrap, html_response=True)
+    assert bootstrap.text.count("<script") == 1
+    assert (
+        '<script src="/delivery-bootstrap.js" defer></script>'
+        in bootstrap.text
+    )
+    assert re.search(
+        r"<script(?![^>]*\bsrc=)",
+        bootstrap.text,
+        flags=re.IGNORECASE,
+    ) is None
+    assert "<noscript>" in bootstrap.text
+    assert GENERIC_UNAVAILABLE_COPY in bootstrap.text
+    for forbidden in (
+        VIN,
+        INTERNAL_NICKNAME,
+        "Northstar Motors",
+        run_id,
+        delivery_secret,
+        "sticker_pdf",
+        "window_sticker.pdf",
+    ):
+        assert forbidden not in bootstrap.text
+
+    script_response = client.get("/delivery-bootstrap.js")
+    assert script_response.status_code == 200
+    _assert_common_public_headers(script_response, html_response=False)
+    script = script_response.text
+    fragment_read = script.index("window.location.hash")
+    fragment_removed = script.index("window.history.replaceState")
+    exchange_fetch = script.index("window.fetch")
+    assert fragment_read < fragment_removed < exchange_fetch
+    assert 'method: "POST"' in script
+    assert 'credentials: "same-origin"' in script
+    assert "JSON.stringify({secret: deliverySecret})" in script
+    assert "`${publicPath}/exchange`" in script
+    assert "window.location.replace(publicPath)" in script
+    assert "window.location.reload()" in script
+    assert "This delivery link is unavailable." in script
+    assert "Ask the person who sent it to create a new link." in script
+    for forbidden_api in (
+        "location.search",
+        "localStorage",
+        "sessionStorage",
+        "indexedDB",
+        "console.",
+        "Authorization",
+        'type="hidden"',
+    ):
+        assert forbidden_api not in script
+
+
+def test_exchange_sets_hashed_scoped_session_without_mutating_run(
+    client: TestClient,
+    isolated_persistence,
+    caplog,
+) -> None:
+    from api.delivery import DELIVERY_SESSION_COOKIE
+
+    run_id, _ = _make_run_with_artifacts()
+    created = _create_link(client, run_id)
+    public_id, delivery_secret = _credentials_from_response(created)
+    capped_link_expiry = (
+        datetime.now(timezone.utc) + timedelta(minutes=30)
+    ).isoformat()
+    connection = connect_db()
+    try:
+        connection.execute(
+            """
+            UPDATE delivery_links
+            SET expires_utc = ?
+            WHERE run_id = ?
+            """,
+            (capped_link_expiry, run_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    link_before = _delivery_rows(run_id)[0]
+    assert link_before["first_opened_utc"] is None
+    assert link_before["first_download_started_utc"] is None
+
+    expired_session_hash = "e" * 64
+    connection = connect_db()
+    try:
+        connection.execute(
+            """
+            INSERT INTO delivery_sessions (
+                delivery_link_id,
+                session_hash,
+                created_utc,
+                expires_utc
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                link_before["id"],
+                expired_session_hash,
+                (
+                    datetime.now(timezone.utc) - timedelta(hours=2)
+                ).isoformat(),
+                (
+                    datetime.now(timezone.utc) - timedelta(hours=1)
+                ).isoformat(),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    caplog.clear()
+    response = _exchange(client, public_id, delivery_secret)
+
+    assert response.status_code == 204
+    assert response.content == b""
+    _assert_common_public_headers(response, html_response=False)
+    set_cookie = response.headers["set-cookie"]
+    assert set_cookie.startswith(f"{DELIVERY_SESSION_COOKIE}=")
+    assert "HttpOnly" in set_cookie
+    assert "SameSite=strict" in set_cookie
+    assert f"Path=/d/{public_id}" in set_cookie
+    assert "Max-Age=" in set_cookie
+    assert "Secure" not in set_cookie
+    assert "Domain=" not in set_cookie
+
+    session_credential = response.cookies.get(DELIVERY_SESSION_COOKIE)
+    assert session_credential
+    assert session_credential != delivery_secret
+    sessions = _delivery_session_rows()
+    assert len(sessions) == 1
+    session = sessions[0]
+    assert session["session_hash"] != expired_session_hash
+    assert session["delivery_link_id"] == link_before["id"]
+    assert session["session_hash"] == hashlib.sha256(
+        session_credential.encode()
+    ).hexdigest()
+    assert session_credential not in tuple(str(value) for value in session)
+    assert delivery_secret not in tuple(str(value) for value in session)
+
+    created_utc = datetime.fromisoformat(session["created_utc"])
+    expires_utc = datetime.fromisoformat(session["expires_utc"])
+    link_expires_utc = datetime.fromisoformat(link_before["expires_utc"])
+    assert expires_utc <= created_utc + timedelta(hours=4)
+    assert expires_utc <= link_expires_utc
+    max_age = int(
+        re.search(r"Max-Age=(\d+)", set_cookie, re.IGNORECASE).group(1)
+    )
+    assert 0 < max_age <= 30 * 60
+
+    database_bytes = isolated_persistence["database_path"].read_bytes()
+    assert session_credential.encode() not in database_bytes
+    assert delivery_secret.encode() not in database_bytes
+    assert session_credential not in caplog.text
+    assert delivery_secret not in caplog.text
+    assert session["session_hash"] not in caplog.text
+    assert link_before["token_hash"] not in caplog.text
+    link_after = _delivery_rows(run_id)[0]
+    assert link_after["first_opened_utc"] is None
+    assert link_after["first_download_started_utc"] is None
+    assert _run_row(run_id)["status"] == "ready"
+
+
+def test_expired_session_and_legacy_path_secret_cannot_authenticate(
+    client: TestClient,
+) -> None:
+    from api.delivery import DELIVERY_SESSION_COOKIE
+
+    run_id, _ = _make_run_with_artifacts()
+    created = _create_link(client, run_id)
+    public_id, delivery_secret = _credentials_from_response(created)
+
+    # The former bearer-path shape is now interpreted only as a public ID.
+    legacy_path = client.get(f"/d/{delivery_secret}")
+    assert legacy_path.status_code == 200
+    assert "Opening secure delivery" in legacy_path.text
+    assert VIN not in legacy_path.text
+    assert delivery_secret not in legacy_path.text
+    assert _exchange(
+        client,
+        delivery_secret,
+        delivery_secret,
+    ).status_code == 404
+    assert client.post(
+        f"/d/{delivery_secret}/artifact/sticker_pdf",
+        headers={"Authorization": f"Bearer {delivery_secret}"},
+        params={"secret": delivery_secret},
+        json={"secret": delivery_secret},
+    ).status_code == 404
+
+    exchanged = _exchange(client, public_id, delivery_secret)
+    assert exchanged.status_code == 204
+    session_credential = exchanged.cookies.get(DELIVERY_SESSION_COOKIE)
+    session_hash = hashlib.sha256(session_credential.encode()).hexdigest()
+    connection = connect_db()
+    try:
+        connection.execute(
+            """
+            UPDATE delivery_sessions
+            SET expires_utc = ?
+            WHERE session_hash = ?
+            """,
+            (
+                (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+                session_hash,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    expired_page = client.get(f"/d/{public_id}")
+    assert expired_page.status_code == 200
+    assert "Opening secure delivery" in expired_page.text
+    assert VIN not in expired_page.text
+    assert client.post(
+        f"/d/{public_id}/artifact/sticker_pdf"
+    ).status_code == 404
+    assert _run_row(run_id)["status"] == "ready"
+    assert _delivery_rows(run_id)[0]["first_opened_utc"] is None
+
+
+def test_public_id_and_session_hash_collisions_are_retried_independently(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    import api.delivery
+
+    first_run, _ = _make_run_with_artifacts()
+    first_created = _create_link(client, first_run)
+    first_public_id, first_secret = _credentials_from_response(first_created)
+    first_exchange = _exchange(client, first_public_id, first_secret)
+    first_session = first_exchange.cookies.get(
+        api.delivery.DELIVERY_SESSION_COOKIE
+    )
+
+    second_run, _ = _make_run_with_artifacts(vin=SECOND_VIN)
+    replacement_public_id = "P" * 22
+    replacement_secret = "S" * 43
+    public_candidates = iter((first_public_id, replacement_public_id))
+    secret_candidates = iter(("R" * 43, replacement_secret))
+    monkeypatch.setattr(
+        api.delivery,
+        "generate_public_id",
+        lambda: next(public_candidates),
+    )
+    monkeypatch.setattr(
+        api.delivery,
+        "generate_delivery_token",
+        lambda: next(secret_candidates),
+    )
+
+    second_created = _create_link(client, second_run)
+    second_public_id, second_secret = _credentials_from_response(
+        second_created
+    )
+    assert second_public_id == replacement_public_id
+    assert second_secret == replacement_secret
+
+    replacement_session = "T" * 43
+    session_candidates = iter((first_session, replacement_session))
+    monkeypatch.setattr(
+        api.delivery,
+        "generate_delivery_session_credential",
+        lambda: next(session_candidates),
+    )
+    second_exchange = _exchange(
+        client,
+        second_public_id,
+        second_secret,
+    )
+    assert second_exchange.status_code == 204
+    assert (
+        second_exchange.cookies.get(api.delivery.DELIVERY_SESSION_COOKIE)
+        == replacement_session
+    )
+    second_session_hash = hashlib.sha256(
+        replacement_session.encode()
+    ).hexdigest()
+    assert any(
+        row["session_hash"] == second_session_hash
+        for row in _delivery_session_rows()
+    )
+
+
+def test_delivery_session_cookie_is_secure_in_production(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import api.config
+
+    production_data = (tmp_path / "production-data").resolve()
+    monkeypatch.setenv("LOTKIT_ENV", "production")
+    monkeypatch.setenv("LOTKIT_DATA_DIR", str(production_data))
+    monkeypatch.setenv(
+        "LOTKIT_PUBLIC_BASE_URL",
+        "https://lotkit.example",
+    )
+    monkeypatch.setenv("LOTKIT_TRUSTED_HOSTS", "lotkit.example")
+    api.config.reset_settings_cache()
+    settings = api.config.get_settings()
+    monkeypatch.setattr(api.main, "RUNS_ROOT", settings.runs_dir)
+    production_app = api.main.create_app(settings)
+
+    with TestClient(
+        production_app,
+        base_url="https://lotkit.example",
+    ) as production_client:
+        run_id, _ = _make_run_with_artifacts()
+        created = _create_link(production_client, run_id)
+        public_id, delivery_secret = _credentials_from_response(created)
+        assert created.json()["share_url"].startswith(
+            "https://lotkit.example/d/"
+        )
+
+        exchanged = _exchange(
+            production_client,
+            public_id,
+            delivery_secret,
+        )
+
+    assert exchanged.status_code == 204
+    set_cookie = exchanged.headers["set-cookie"]
+    assert "Secure" in set_cookie
+    assert "HttpOnly" in set_cookie
+    assert "SameSite=strict" in set_cookie
+    assert f"Path=/d/{public_id}" in set_cookie
+    assert "Domain=" not in set_cookie
 
 
 def test_delivery_preserves_run_history_csv_and_owner_artifact_access(

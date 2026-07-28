@@ -1227,7 +1227,9 @@
             <p id="delivery-message" class="security-note"></p>
             <dl id="delivery-meta" class="delivery-meta"></dl>
             <div id="delivery-url-panel" class="delivery-url" hidden>
-              <label for="delivery-url">Shareable URL</label>
+              <label for="delivery-url">
+                Original share link (shown once)
+              </label>
               <input
                 id="delivery-url"
                 type="text"
@@ -1250,8 +1252,11 @@
                 </a>
               </div>
               <p class="security-note">
-                Copy this URL now. LotKit does not store the raw link for
-                security. If it is lost, create a replacement.
+                Copy the original link from LotKit now, including the required
+                part after #. Opening the link removes that secret from the
+                browser address bar, so copying the cleaned address afterward
+                will not create a working link. LotKit does not store the
+                original link; if it is lost, create a replacement.
               </p>
             </div>
             <div class="inline-actions">
@@ -2611,18 +2616,27 @@
             throw new Error(message);
           }
 
+          if (typeof payload.share_url !== "string") {
+            throw new Error("The delivery link response was incomplete.");
+          }
+
+          let shareUrlObject;
+          try {
+            shareUrlObject = new URL(payload.share_url);
+          } catch {
+            throw new Error("The delivery link response was incomplete.");
+          }
           if (
-            typeof payload.public_path !== "string"
-            || !payload.public_path.startsWith("/d/")
-            || typeof payload.public_base_url !== "string"
-            || !payload.public_base_url
+            !/^\/d\/[A-Za-z0-9_-]{22}$/.test(shareUrlObject.pathname)
+            || !/^#[A-Za-z0-9_-]{43}$/.test(shareUrlObject.hash)
+            || shareUrlObject.search
+            || shareUrlObject.username
+            || shareUrlObject.password
+            || !["http:", "https:"].includes(shareUrlObject.protocol)
           ) {
             throw new Error("The delivery link response was incomplete.");
           }
-          const shareUrl = new URL(
-            payload.public_path,
-            `${payload.public_base_url.replace(/\/+$/, "")}/`,
-          ).href;
+          const shareUrl = shareUrlObject.href;
           ephemeralDeliveryUrl = {runId, url: shareUrl};
           displayedDeliveryStatus = {
             state: payload.state || "active",

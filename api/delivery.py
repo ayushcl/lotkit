@@ -22,16 +22,32 @@ from api.runs import (
 )
 
 DELIVERY_LIFETIME = timedelta(days=30)
+DELIVERY_SESSION_LIFETIME = timedelta(hours=4)
 TOKEN_HINT_LENGTH = 6
 TOKEN_MIN_LENGTH = 40
 TOKEN_MAX_LENGTH = 64
 TOKEN_PATTERN = re.compile(
     rf"^[A-Za-z0-9_-]{{{TOKEN_MIN_LENGTH},{TOKEN_MAX_LENGTH}}}$"
 )
+DUMMY_DELIVERY_TOKEN_HASH = hashlib.sha256(
+    b"LotKit delivery secret comparison placeholder"
+).hexdigest()
+PUBLIC_ID_MIN_LENGTH = 22
+PUBLIC_ID_MAX_LENGTH = 22
+PUBLIC_ID_PATTERN = re.compile(
+    rf"^[A-Za-z0-9_-]{{{PUBLIC_ID_MIN_LENGTH},{PUBLIC_ID_MAX_LENGTH}}}$"
+)
+DELIVERY_SESSION_COOKIE = "lotkit_delivery_session"
 
 DELIVERY_STATES = frozenset({"active", "expired", "revoked"})
 REVOCATION_REASONS = frozenset(
-    {"replaced", "manual", "reopened", "outputs_changed"}
+    {
+        "replaced",
+        "manual",
+        "reopened",
+        "outputs_changed",
+        "transport_migrated",
+    }
 )
 
 ARTIFACT_POLICIES = {
@@ -66,6 +82,19 @@ PUBLIC_UNAVAILABLE_HTML = (
     f"{PUBLIC_UNAVAILABLE_COPY}"
     "</p></main></body></html>"
 )
+PUBLIC_BOOTSTRAP_HTML = (
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>Vehicle files</title>"
+    "<style>body{font-family:system-ui,sans-serif;max-width:42rem;"
+    "margin:4rem auto;padding:0 1.25rem;line-height:1.5;color:#202124}"
+    "</style>"
+    "<script src=\"/delivery-bootstrap.js\" defer></script>"
+    "</head><body><main><h1>Vehicle files</h1>"
+    "<p id=\"delivery-status\">Opening secure delivery…</p>"
+    f"<noscript><p>{PUBLIC_UNAVAILABLE_COPY}</p></noscript>"
+    "</main></body></html>"
+)
 
 PUBLIC_BASE_SECURITY_HEADERS = {
     "Cache-Control": "no-store, private",
@@ -77,15 +106,10 @@ PUBLIC_BASE_SECURITY_HEADERS = {
     "Cross-Origin-Resource-Policy": "same-origin",
 }
 PUBLIC_CONTENT_SECURITY_POLICY = (
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
-    "base-uri 'none'; frame-ancestors 'none'"
+    "default-src 'none'; script-src 'self'; connect-src 'self'; "
+    "style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; "
+    "frame-ancestors 'none'"
 )
-
-# Invalid tokens still take the indexed hash-lookup path. This constant is
-# not a bearer credential and avoids putting malformed input into SQL.
-INVALID_TOKEN_LOOKUP_HASH = hashlib.sha256(
-    b"LotKit invalid delivery token lookup"
-).hexdigest()
 
 
 class DeliveryError(Exception):
@@ -122,6 +146,21 @@ class ResolvedManifestArtifact:
     path: Path
     download_name: str
     content_type: str
+
+
+@dataclass(frozen=True)
+class CreatedDeliveryLink:
+    public_id: str
+    delivery_secret: str
+    expires_utc: str
+    token_hint: str
+
+
+@dataclass(frozen=True)
+class CreatedDeliverySession:
+    credential: str
+    expires_utc: str
+    max_age: int
 
 
 def utc_now() -> datetime:
@@ -164,12 +203,31 @@ def generate_delivery_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def generate_public_id() -> str:
+    """Create an independent, non-secret 128-bit public identifier."""
+
+    return secrets.token_urlsafe(16)
+
+
+def generate_delivery_session_credential() -> str:
+    """Create a fresh approximately 256-bit short-lived session secret."""
+
+    return secrets.token_urlsafe(32)
+
+
 def hash_delivery_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def validate_delivery_token_format(token: Any) -> bool:
     return isinstance(token, str) and TOKEN_PATTERN.fullmatch(token) is not None
+
+
+def validate_public_id_format(public_id: Any) -> bool:
+    return (
+        isinstance(public_id, str)
+        and PUBLIC_ID_PATTERN.fullmatch(public_id) is not None
+    )
 
 
 def delivery_token_hint(token: str) -> str:
@@ -207,6 +265,10 @@ def _safe_stored_filename(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     filename = value.strip()
+    try:
+        encoded_filename = filename.encode("utf-8")
+    except UnicodeError:
+        return None
     if (
         not filename
         or filename in {".", ".."}
@@ -214,6 +276,7 @@ def _safe_stored_filename(value: Any) -> str | None:
         or "/" in filename
         or "\\" in filename
         or Path(filename).name != filename
+        or len(encoded_filename) > 255
     ):
         return None
     return filename
@@ -299,7 +362,7 @@ def _manifest_from(value: Any) -> dict[str, Any]:
     if isinstance(raw_manifest, str):
         try:
             parsed = json.loads(raw_manifest)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             return {}
     else:
         parsed = raw_manifest
@@ -362,16 +425,15 @@ def resolve_manifest_artifact(
 
     try:
         run_directory = safe_run_directory(stored_run_id, runs_root)
-    except InvalidRunDataError:
-        return None
-
-    lexical_candidate = run_directory / filename
-    candidate = lexical_candidate.resolve()
-    if (
-        candidate != lexical_candidate
-        or candidate.parent != run_directory
-        or not candidate.is_file()
-    ):
+        lexical_candidate = run_directory / filename
+        candidate = lexical_candidate.resolve()
+        if (
+            candidate != lexical_candidate
+            or candidate.parent != run_directory
+            or not candidate.is_file()
+        ):
+            return None
+    except (InvalidRunDataError, OSError):
         return None
 
     return ResolvedManifestArtifact(
@@ -382,9 +444,9 @@ def resolve_manifest_artifact(
     )
 
 
-def _lookup_delivery_link_by_hash(
+def _lookup_delivery_link_by_public_id(
     connection: sqlite3.Connection,
-    token_hash: str,
+    public_id: str,
 ) -> sqlite3.Row | None:
     return connection.execute(
         """
@@ -395,53 +457,247 @@ def _lookup_delivery_link_by_hash(
                runs.updated_utc AS run_updated_utc
         FROM delivery_links
         JOIN runs ON runs.run_id = delivery_links.run_id
-        WHERE delivery_links.token_hash = ?
+        WHERE delivery_links.public_id = ?
         """,
-        (token_hash,),
+        (public_id,),
     ).fetchone()
 
 
-def get_usable_delivery_link_by_token(
+def _lookup_delivery_link_by_session(
     connection: sqlite3.Connection,
-    token: Any,
+    public_id: str,
+    session_hash: str,
+) -> sqlite3.Row | None:
+    return connection.execute(
+        """
+        SELECT delivery_links.*,
+               delivery_sessions.id AS delivery_session_id,
+               delivery_sessions.created_utc AS session_created_utc,
+               delivery_sessions.expires_utc AS session_expires_utc,
+               runs.vin AS run_vin,
+               runs.vehicle_json AS run_vehicle_json,
+               runs.status AS run_status,
+               runs.updated_utc AS run_updated_utc
+        FROM delivery_sessions
+        JOIN delivery_links
+          ON delivery_links.id = delivery_sessions.delivery_link_id
+        JOIN runs ON runs.run_id = delivery_links.run_id
+        WHERE delivery_links.public_id = ?
+          AND delivery_sessions.session_hash = ?
+        """,
+        (public_id, session_hash),
+    ).fetchone()
+
+
+def _resolved_manifest_artifact_types(
+    link: Any,
+    runs_root: str | Path,
+) -> list[str]:
+    return [
+        artifact_type
+        for artifact_type in manifest_artifact_types(link)
+        if resolve_manifest_artifact(link, artifact_type, runs_root)
+        is not None
+    ]
+
+
+def _active_link_with_artifacts(
+    row: sqlite3.Row | None,
+    runs_root: str | Path,
+    now: datetime,
+) -> bool:
+    return bool(
+        row is not None
+        and _row_value(row, "public_id")
+        and derive_delivery_link_state(row, now) == "active"
+        and _resolved_manifest_artifact_types(row, runs_root)
+    )
+
+
+def exchange_delivery_secret(
+    connection: sqlite3.Connection,
+    public_id: Any,
+    delivery_secret: Any,
+    runs_root: str | Path,
+    now: datetime | None = None,
+) -> CreatedDeliverySession | None:
+    current = _as_utc(now)
+    if (
+        not validate_public_id_format(public_id)
+        or not validate_delivery_token_format(delivery_secret)
+        or connection.in_transaction
+    ):
+        return None
+
+    submitted_hash = hash_delivery_token(delivery_secret)
+    row = _lookup_delivery_link_by_public_id(connection, public_id)
+    stored_hash = (
+        str(row["token_hash"])
+        if row is not None and row["token_hash"]
+        else DUMMY_DELIVERY_TOKEN_HASH
+    )
+    if (
+        not secrets.compare_digest(submitted_hash, stored_hash)
+        or not _active_link_with_artifacts(row, runs_root, current)
+    ):
+        return None
+
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        current = _as_utc(now)
+        row = _lookup_delivery_link_by_public_id(connection, public_id)
+        stored_hash = (
+            str(row["token_hash"])
+            if row is not None and row["token_hash"]
+            else DUMMY_DELIVERY_TOKEN_HASH
+        )
+        if (
+            not secrets.compare_digest(submitted_hash, stored_hash)
+            or not _active_link_with_artifacts(row, runs_root, current)
+        ):
+            connection.rollback()
+            return None
+
+        link_expiry = _parse_utc(row["expires_utc"])
+        if link_expiry is None:
+            connection.rollback()
+            return None
+        session_expiry = min(
+            current + DELIVERY_SESSION_LIFETIME,
+            link_expiry,
+        )
+        max_age = int((session_expiry - current).total_seconds())
+        if max_age <= 0:
+            connection.rollback()
+            return None
+
+        connection.execute(
+            "DELETE FROM delivery_sessions WHERE expires_utc <= ?",
+            (_utc_text(current),),
+        )
+
+        credential = ""
+        for _attempt in range(8):
+            candidate = generate_delivery_session_credential()
+            session_hash = hash_delivery_token(candidate)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO delivery_sessions (
+                        delivery_link_id,
+                        session_hash,
+                        created_utc,
+                        expires_utc
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        row["id"],
+                        session_hash,
+                        _utc_text(current),
+                        _utc_text(session_expiry),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                if connection.execute(
+                    """
+                    SELECT 1
+                    FROM delivery_sessions
+                    WHERE session_hash = ?
+                    """,
+                    (session_hash,),
+                ).fetchone():
+                    continue
+                raise
+            credential = candidate
+            break
+        else:
+            raise DeliveryError(
+                "Could not allocate a delivery session credential."
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+    return CreatedDeliverySession(
+        credential=credential,
+        expires_utc=_utc_text(session_expiry),
+        max_age=max_age,
+    )
+
+
+def get_usable_delivery_link_by_session(
+    connection: sqlite3.Connection,
+    public_id: Any,
+    session_credential: Any,
+    runs_root: str | Path,
     now: datetime | None = None,
     *,
     mark_opened: bool = False,
 ) -> sqlite3.Row | None:
-    current = _as_utc(now)
-    lookup_hash = (
-        hash_delivery_token(token)
-        if validate_delivery_token_format(token)
-        else INVALID_TOKEN_LOOKUP_HASH
-    )
-    row = _lookup_delivery_link_by_hash(connection, lookup_hash)
     if (
-        row is None
-        or derive_delivery_link_state(row, current) != "active"
-        or not manifest_artifact_types(row)
+        not validate_public_id_format(public_id)
+        or not validate_delivery_token_format(session_credential)
     ):
         return None
 
-    if mark_opened and row["first_opened_utc"] is None:
-        connection.execute(
-            """
-            UPDATE delivery_links
-            SET first_opened_utc = ?
-            WHERE id = ?
-              AND first_opened_utc IS NULL
-              AND revoked_utc IS NULL
-            """,
-            (_utc_text(current), row["id"]),
+    session_hash = hash_delivery_token(session_credential)
+
+    def usable_row(current: datetime) -> sqlite3.Row | None:
+        row = _lookup_delivery_link_by_session(
+            connection,
+            public_id,
+            session_hash,
         )
-        connection.commit()
-        row = _lookup_delivery_link_by_hash(connection, lookup_hash)
+        session_expiry = (
+            _parse_utc(row["session_expires_utc"])
+            if row is not None
+            else None
+        )
         if (
-            row is None
-            or derive_delivery_link_state(row, current) != "active"
-            or not manifest_artifact_types(row)
+            not _active_link_with_artifacts(row, runs_root, current)
+            or session_expiry is None
+            or current >= session_expiry
         ):
             return None
-    return row
+        return row
+
+    if not mark_opened:
+        return usable_row(_as_utc(now))
+    if connection.in_transaction:
+        return None
+
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        current = _as_utc(now)
+        row = usable_row(current)
+        if row is None:
+            connection.rollback()
+            return None
+        if row["first_opened_utc"] is None:
+            updated = connection.execute(
+                """
+                UPDATE delivery_links
+                SET first_opened_utc = ?
+                WHERE id = ?
+                  AND first_opened_utc IS NULL
+                  AND revoked_utc IS NULL
+                """,
+                (_utc_text(current), row["id"]),
+            )
+            if updated.rowcount != 1:
+                connection.rollback()
+                return None
+            row = usable_row(current)
+            if row is None:
+                connection.rollback()
+                return None
+        connection.commit()
+        return row
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def _delete_manifest_files(
@@ -494,7 +750,7 @@ def create_delivery_link(
     run_id: str,
     runs_root: str | Path,
     now: datetime | None = None,
-) -> dict[str, Any]:
+) -> CreatedDeliveryLink:
     current = _as_utc(now)
     expires = current + DELIVERY_LIFETIME
     manifest: dict[str, dict[str, str]] = {}
@@ -534,12 +790,18 @@ def create_delivery_link(
         )
 
         token = ""
+        public_id = ""
         for _attempt in range(8):
-            candidate = generate_delivery_token()
-            token_hash = hash_delivery_token(candidate)
+            candidate_token = generate_delivery_token()
+            candidate_public_id = generate_public_id()
+            token_hash = hash_delivery_token(candidate_token)
             if connection.execute(
-                "SELECT 1 FROM delivery_links WHERE token_hash = ?",
-                (token_hash,),
+                """
+                SELECT 1
+                FROM delivery_links
+                WHERE token_hash = ? OR public_id = ?
+                """,
+                (token_hash, candidate_public_id),
             ).fetchone():
                 continue
 
@@ -549,19 +811,21 @@ def create_delivery_link(
                     INSERT INTO delivery_links (
                         owner_id,
                         run_id,
+                        public_id,
                         token_hash,
                         token_hint,
                         artifact_manifest_json,
                         created_utc,
                         expires_utc
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         owner_id,
                         run_id,
+                        candidate_public_id,
                         token_hash,
-                        delivery_token_hint(candidate),
+                        delivery_token_hint(candidate_token),
                         json.dumps(
                             manifest,
                             ensure_ascii=False,
@@ -574,12 +838,17 @@ def create_delivery_link(
                 )
             except sqlite3.IntegrityError:
                 if connection.execute(
-                    "SELECT 1 FROM delivery_links WHERE token_hash = ?",
-                    (token_hash,),
+                    """
+                    SELECT 1
+                    FROM delivery_links
+                    WHERE token_hash = ? OR public_id = ?
+                    """,
+                    (token_hash, candidate_public_id),
                 ).fetchone():
                     continue
                 raise
-            token = candidate
+            token = candidate_token
+            public_id = candidate_public_id
             break
         else:
             raise DeliveryError("Could not allocate a delivery credential.")
@@ -591,12 +860,12 @@ def create_delivery_link(
             _delete_manifest_files(manifest, run_id, runs_root)
         raise
 
-    return {
-        "public_path": f"/d/{token}",
-        "expires_utc": _utc_text(expires),
-        "state": "active",
-        "token_hint": delivery_token_hint(token),
-    }
+    return CreatedDeliveryLink(
+        public_id=public_id,
+        delivery_secret=token,
+        expires_utc=_utc_text(expires),
+        token_hint=delivery_token_hint(token),
+    )
 
 
 def get_owner_delivery_status(
@@ -776,9 +1045,10 @@ def reopen_delivered_run(
     return detail
 
 
-def begin_public_artifact_download(
+def begin_public_artifact_download_by_session(
     connection: sqlite3.Connection,
-    token: Any,
+    public_id: Any,
+    session_credential: Any,
     artifact_type: str,
     runs_root: str | Path,
     now: datetime | None = None,
@@ -792,9 +1062,11 @@ def begin_public_artifact_download(
     """
 
     current = _as_utc(now)
-    link = get_usable_delivery_link_by_token(
+    link = get_usable_delivery_link_by_session(
         connection,
-        token,
+        public_id,
+        session_credential,
+        runs_root,
         current,
     )
     if link is None:
@@ -814,9 +1086,12 @@ def begin_public_artifact_download(
 
     try:
         connection.execute("BEGIN IMMEDIATE")
-        link = get_usable_delivery_link_by_token(
+        current = _as_utc(now)
+        link = get_usable_delivery_link_by_session(
             connection,
-            token,
+            public_id,
+            session_credential,
+            runs_root,
             current,
         )
         if link is None:
@@ -891,25 +1166,45 @@ def public_unavailable_response() -> HTMLResponse:
     )
 
 
-DELIVERY_LOG_PATH_PATTERN = re.compile(
-    r"(?P<prefix>/d/)[A-Za-z0-9_-]{20,128}"
-    r"(?=(?:/|[?#\s\"']|$))"
+def public_bootstrap_response() -> HTMLResponse:
+    """Return the information-free fragment-exchange bootstrap page."""
+
+    return HTMLResponse(
+        content=PUBLIC_BOOTSTRAP_HTML,
+        status_code=200,
+        headers=public_security_headers(html_response=True),
+    )
+
+
+DELIVERY_LOG_FRAGMENT_PATTERN = re.compile(
+    r"(?P<prefix>/d/[A-Za-z0-9_-]{1,128})"
+    r"#[A-Za-z0-9_-]{40,64}"
+)
+RETIRED_DELIVERY_SECRET_PATH_PATTERN = re.compile(
+    r"(?P<prefix>/d/)[A-Za-z0-9_-]{40,64}"
+    r"(?=(?:/|[?\s\"']|$))"
 )
 
 
-def redact_delivery_tokens(value: str) -> str:
-    return DELIVERY_LOG_PATH_PATTERN.sub(
-        r"\g<prefix>[REDACTED]",
+def redact_delivery_secrets(value: str) -> str:
+    """Redact accidental fragments and retired bearer-path credentials."""
+
+    fragment_redacted = DELIVERY_LOG_FRAGMENT_PATTERN.sub(
+        r"\g<prefix>#[REDACTED]",
         value,
+    )
+    return RETIRED_DELIVERY_SECRET_PATH_PATTERN.sub(
+        r"\g<prefix>[REDACTED]",
+        fragment_redacted,
     )
 
 
 def _redact_log_value(value: Any) -> Any:
     if isinstance(value, str):
-        return redact_delivery_tokens(value)
+        return redact_delivery_secrets(value)
     if isinstance(value, bytes):
         try:
-            redacted = redact_delivery_tokens(value.decode("utf-8"))
+            redacted = redact_delivery_secrets(value.decode("utf-8"))
         except UnicodeDecodeError:
             return value
         return redacted.encode("utf-8")
@@ -925,7 +1220,7 @@ def _redact_log_value(value: Any) -> Any:
     return value
 
 
-class RedactDeliveryTokenFilter(logging.Filter):
+class RedactDeliverySecretFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = _redact_log_value(record.msg)
         record.args = _redact_log_value(record.args)
@@ -944,21 +1239,22 @@ class RedactDeliveryTokenFilter(logging.Filter):
 
 def _has_redaction_filter(target: Any) -> bool:
     return any(
-        isinstance(existing, RedactDeliveryTokenFilter)
+        isinstance(existing, RedactDeliverySecretFilter)
         for existing in target.filters
     )
 
 
-def install_delivery_token_log_redaction() -> RedactDeliveryTokenFilter:
+def install_delivery_secret_log_redaction() -> RedactDeliverySecretFilter:
     """
-    Install redaction on application and Uvicorn log paths.
+    Install defensive delivery-secret redaction on application logs.
 
-    Phase 5 deployment must also configure its reverse proxy/platform not to
-    retain raw bearer-token paths; an application filter cannot redact logs
-    emitted before a request reaches this process.
+    Normal HTTP request paths contain only a non-secret public ID because URL
+    fragments are never sent in HTTP. This filter is defense in depth for an
+    accidental full share URL and for requests to retired bearer-path links;
+    LotKit does not log exchange bodies or cookie values.
     """
 
-    redaction_filter = RedactDeliveryTokenFilter()
+    redaction_filter = RedactDeliverySecretFilter()
     loggers = [
         logging.getLogger(),
         logging.getLogger("lotkit"),
