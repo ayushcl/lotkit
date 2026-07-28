@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://render.com/schema/render.yaml.json
+services:
+  # Intentionally omit plan; verify/select a paid instance in the Dashboard
+  # before applying this Blueprint because the persistent disk requires one.
+  - type: web
+    name: lotkit
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: "off"
+    numInstances: 1
+    envVars:
+      - key: LOTKIT_ENV
+        value: production
+      - key: LOTKIT_DATA_DIR
+        value: /var/data
+      - key: LOTKIT_PUBLIC_BASE_URL
+        sync: false
+      - key: LOTKIT_TRUSTED_HOSTS
+        sync: false
+    disk:
+      name: lotkit-data
+      mountPath: /var/data
+      sizeGB: 1

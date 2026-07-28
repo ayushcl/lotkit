@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
+import api.config
 import api.db
-import api.dealerships
 import api.main
 from api.auth import current_owner_id
 
@@ -11,18 +11,29 @@ from api.auth import current_owner_id
 @pytest.fixture(autouse=True)
 def isolated_persistence(tmp_path_factory, monkeypatch):
     persistence_root: Path = tmp_path_factory.mktemp("lotkit-persistence")
-    database_path = persistence_root / "lotkit.db"
-    logo_root = persistence_root / "storage" / "logos"
+    monkeypatch.setenv("LOTKIT_ENV", "test")
+    monkeypatch.setenv("LOTKIT_DATA_DIR", str(persistence_root))
+    monkeypatch.setenv(
+        "LOTKIT_PUBLIC_BASE_URL",
+        "http://127.0.0.1:8000",
+    )
+    monkeypatch.setenv(
+        "LOTKIT_TRUSTED_HOSTS",
+        "testserver,localhost,127.0.0.1",
+    )
+    api.config.reset_settings_cache()
+    settings = api.config.get_settings()
 
-    monkeypatch.setattr(api.db, "DB_PATH", database_path)
-    monkeypatch.setattr(api.dealerships, "BASE_DIR", persistence_root)
-    monkeypatch.setattr(api.dealerships, "LOGO_ROOT", logo_root)
-    monkeypatch.setattr(api.main, "RUNS_ROOT", persistence_root / "runs")
+    # Existing endpoint tests reference this compatibility alias directly.
+    monkeypatch.setattr(api.main, "RUNS_ROOT", settings.runs_dir)
     api.db.init_db()
 
     yield {
-        "database_path": database_path,
-        "logo_root": logo_root,
+        "database_path": settings.database_path,
+        "logo_root": settings.dealership_logos_dir,
+        "runs_root": settings.runs_dir,
+        "settings": settings,
     }
 
     api.main.app.dependency_overrides.pop(current_owner_id, None)
+    api.config.reset_settings_cache()

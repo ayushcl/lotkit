@@ -349,10 +349,12 @@ def test_create_link_uses_high_entropy_hashed_token_and_returns_raw_once(
     assert response.status_code == 201
     assert set(response.json()) == {
         "public_path",
+        "public_base_url",
         "expires_utc",
         "state",
         "token_hint",
     }
+    assert response.json()["public_base_url"] == "http://127.0.0.1:8000"
     assert response.json()["state"] == "active"
     token = _token_from_response(response)
     assert re.fullmatch(r"[A-Za-z0-9_-]{40,64}", token)

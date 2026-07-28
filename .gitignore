@@ -9,3 +9,4 @@ uploads/
 storage/
 lotkit.db
 *.db
+*.db-*

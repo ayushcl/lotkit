@@ -7,10 +7,8 @@ from typing import Any
 
 from PIL import Image
 
+from api.config import Settings, ensure_persistent_directories, get_settings
 from api.photos import safe_ext
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-LOGO_ROOT = BASE_DIR / "storage" / "logos"
 
 PROFILE_FIELDS = (
     "nickname",
@@ -68,11 +66,26 @@ def validate_logo(filename: str, file_bytes: bytes) -> str:
     return extension
 
 
-def _logo_relative_path(profile_id: int, extension: str) -> Path:
-    return Path("storage") / "logos" / f"profile_{profile_id}{extension}"
+def _logo_relative_path(
+    profile_id: int,
+    extension: str,
+    settings: Settings,
+) -> Path:
+    logo_root = settings.dealership_logos_dir.resolve()
+    try:
+        relative_root = logo_root.relative_to(settings.data_dir.resolve())
+    except ValueError as exc:
+        raise InvalidLogoError(
+            "Could not resolve the logo storage path."
+        ) from exc
+    return relative_root / f"profile_{profile_id}{extension}"
 
 
-def resolve_logo_path(logo_path: str | None) -> Path | None:
+def resolve_logo_path(
+    logo_path: str | None,
+    *,
+    settings: Settings | None = None,
+) -> Path | None:
     if not logo_path:
         return None
 
@@ -80,20 +93,35 @@ def resolve_logo_path(logo_path: str | None) -> Path | None:
     if relative_path.is_absolute() or ".." in relative_path.parts:
         return None
 
-    logo_root = LOGO_ROOT.resolve()
-    candidate = (BASE_DIR / relative_path).resolve()
-    if candidate.parent != logo_root:
+    configured = settings or get_settings()
+    data_root = configured.data_dir.resolve()
+    logo_root = configured.dealership_logos_dir.resolve()
+    if not logo_root.is_relative_to(data_root):
+        return None
+    candidate = (configured.data_dir / relative_path).resolve()
+    if (
+        candidate.parent != logo_root
+        or not candidate.is_relative_to(data_root)
+    ):
         return None
     return candidate
 
 
 def save_logo(profile_id: int, extension: str, file_bytes: bytes) -> str:
-    LOGO_ROOT.mkdir(parents=True, exist_ok=True)
-    relative_path = _logo_relative_path(profile_id, extension)
-    destination = resolve_logo_path(relative_path.as_posix())
+    settings = get_settings()
+    ensure_persistent_directories(settings)
+    relative_path = _logo_relative_path(profile_id, extension, settings)
+    destination = resolve_logo_path(
+        relative_path.as_posix(),
+        settings=settings,
+    )
     if destination is None:
         raise InvalidLogoError("Could not resolve the logo storage path.")
     destination.write_bytes(file_bytes)
+    try:
+        destination.chmod(0o600)
+    except OSError:
+        pass
     return relative_path.as_posix()
 
 

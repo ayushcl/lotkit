@@ -1,14 +1,18 @@
 import html
 import json
+import logging
+import os
 import shutil
+import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, mkstemp
 from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import (
+    APIRouter,
     Depends,
     FastAPI,
     File,
@@ -18,12 +22,19 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from api.auth import current_owner_id, get_or_create_default_owner
 from api.buyers_guide import render_buyers_guide
+from api.config import (
+    ConfigurationError,
+    Settings,
+    ensure_persistent_directories,
+    get_settings,
+)
 from api.db import connect_db, init_db
 from api.decode import VinDecodeError, decode_vin
 from api.delivery import (
@@ -79,26 +90,17 @@ from api.runs import (
 from api.sticker import build_sticker_pdf
 from api.vin import is_valid_vin, normalize_vin
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-RUNS_ROOT = BASE_DIR / "runs"
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 load_dotenv(BASE_DIR / ".env")
 
-
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    install_delivery_token_log_redaction()
-    init_db()
-    connection = connect_db()
-    try:
-        get_or_create_default_owner(connection)
-    finally:
-        connection.close()
-    yield
-
-
-app = FastAPI(lifespan=lifespan)
+RUNS_ROOT = get_settings().runs_dir
+LOGGER = logging.getLogger("uvicorn.error")
+REQUIRED_TABLES = frozenset(
+    {"users", "dealership_profiles", "runs", "delivery_links"}
+)
+router = APIRouter()
 
 
 class VinRequest(BaseModel):
@@ -119,9 +121,87 @@ class BuyersGuideRequest(BaseModel):
     interior_colour: str | None = None
 
 
-@app.get("/health")
+@router.get("/health")
 def health() -> dict[str, bool | str]:
     return {"ok": True, "service": "lotkit"}
+
+
+def _verify_readiness(app_instance: FastAPI) -> None:
+    if not bool(getattr(app_instance.state, "startup_completed", False)):
+        raise RuntimeError("Application startup is incomplete.")
+
+    settings: Settings = app_instance.state.settings
+    data_dir = settings.data_dir.resolve()
+    required_directories = (
+        data_dir,
+        settings.runs_dir.resolve(),
+        settings.dealership_logos_dir.resolve(),
+    )
+    if any(not directory.is_dir() for directory in required_directories):
+        raise RuntimeError("Required persistent storage is unavailable.")
+    if any(
+        not directory.is_relative_to(data_dir)
+        for directory in required_directories[1:]
+    ):
+        raise RuntimeError("Persistent storage configuration is unsafe.")
+    if (
+        not settings.database_path.is_file()
+        or not settings.database_path.resolve().is_relative_to(data_dir)
+    ):
+        raise RuntimeError("The database is unavailable.")
+
+    connection = sqlite3.connect(
+        f"{settings.database_path.resolve().as_uri()}?mode=rw",
+        uri=True,
+    )
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        available_tables = {
+            str(row[0])
+            for row in connection.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                """
+            )
+        }
+        if not REQUIRED_TABLES.issubset(available_tables):
+            raise RuntimeError("Required database schema is unavailable.")
+    finally:
+        connection.close()
+
+    descriptor: int | None = None
+    probe_path: Path | None = None
+    try:
+        descriptor, raw_path = mkstemp(
+            prefix=".lotkit-readiness-",
+            dir=data_dir,
+        )
+        probe_path = Path(raw_path)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if probe_path is not None:
+            probe_path.unlink(missing_ok=True)
+
+
+@router.get("/ready")
+def readiness(request: Request) -> JSONResponse:
+    try:
+        _verify_readiness(request.app)
+    except Exception as exc:
+        LOGGER.warning(
+            "Readiness check failed (%s).",
+            type(exc).__name__,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "service": "lotkit", "ready": False},
+        )
+    return JSONResponse(
+        content={"ok": True, "service": "lotkit", "ready": True}
+    )
 
 
 def _parse_optional_dealership_id(value: Any) -> int | None:
@@ -258,13 +338,21 @@ def _record_output(
 
 
 def _write_run_file(target: RunTarget, filename: str, content: bytes) -> Path:
-    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     run_directory = safe_run_directory(target.run_id, RUNS_ROOT)
-    run_directory.mkdir(parents=False, exist_ok=not target.is_new)
+    run_directory.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    run_directory.mkdir(
+        parents=False,
+        exist_ok=not target.is_new,
+        mode=0o700,
+    )
     destination = (run_directory / filename).resolve()
     if destination.parent != run_directory:
         raise InvalidRunDataError("Unsafe artifact filename.")
     destination.write_bytes(content)
+    try:
+        destination.chmod(0o600)
+    except OSError:
+        pass
     return destination
 
 
@@ -472,7 +560,7 @@ async def _read_dealership_logo(
     return extension, file_bytes
 
 
-@app.post("/api/dealerships")
+@router.post("/api/dealerships")
 async def create_dealership(
     nickname: str | None = Form(None),
     dealership_name: str | None = Form(None),
@@ -504,7 +592,7 @@ async def create_dealership(
         connection.close()
 
 
-@app.get("/api/dealerships")
+@router.get("/api/dealerships")
 def get_dealerships(owner_id: int = Depends(current_owner_id)):
     connection = connect_db()
     try:
@@ -513,7 +601,7 @@ def get_dealerships(owner_id: int = Depends(current_owner_id)):
         connection.close()
 
 
-@app.get("/api/dealerships/{profile_id}")
+@router.get("/api/dealerships/{profile_id}")
 def get_dealership(
     profile_id: int,
     owner_id: int = Depends(current_owner_id),
@@ -532,7 +620,7 @@ def get_dealership(
     return profile
 
 
-@app.put("/api/dealerships/{profile_id}")
+@router.put("/api/dealerships/{profile_id}")
 async def update_dealership(
     profile_id: int,
     nickname: str | None = Form(None),
@@ -578,7 +666,7 @@ async def update_dealership(
     return profile
 
 
-@app.delete("/api/dealerships/{profile_id}")
+@router.delete("/api/dealerships/{profile_id}")
 def delete_dealership(
     profile_id: int,
     owner_id: int = Depends(current_owner_id),
@@ -597,7 +685,7 @@ def delete_dealership(
     return {"ok": True}
 
 
-@app.get("/api/dealerships/{profile_id}/logo")
+@router.get("/api/dealerships/{profile_id}/logo")
 def get_dealership_logo(
     profile_id: int,
     owner_id: int = Depends(current_owner_id),
@@ -623,7 +711,7 @@ def get_dealership_logo(
     )
 
 
-@app.post("/api/decode")
+@router.post("/api/decode")
 async def decode_vin_endpoint(request: VinRequest):
     vin = normalize_vin(request.vin)
     if not is_valid_vin(vin):
@@ -646,7 +734,7 @@ async def decode_vin_endpoint(request: VinRequest):
     return {"vin": vin, "vehicle": vehicle}
 
 
-@app.post("/api/photos/package")
+@router.post("/api/photos/package")
 async def package_photos(
     vin: str = Form(...),
     vehicle: str = Form(...),
@@ -724,8 +812,9 @@ async def package_photos(
                 break
     ordered_files.extend(remaining)
 
-    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     try:
+        safe_run_directory(target.run_id, RUNS_ROOT)
+        RUNS_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
         original_zip_filename = f"{normalized_vin}_photos.zip"
         zip_filename = _artifact_filename(
             target,
@@ -749,7 +838,11 @@ async def package_photos(
                     raise FileExistsError("Run storage already exists.")
                 staged_directory.replace(run_directory)
             else:
-                run_directory.mkdir(parents=False, exist_ok=True)
+                run_directory.mkdir(
+                    parents=False,
+                    exist_ok=True,
+                    mode=0o700,
+                )
                 for staged_file in staged_directory.iterdir():
                     destination_name = (
                         zip_filename
@@ -805,7 +898,7 @@ async def package_photos(
     )
 
 
-@app.get("/api/photos/download/{run_id}")
+@router.get("/api/photos/download/{run_id}")
 def download_photos(
     run_id: str,
     owner_id: int = Depends(current_owner_id),
@@ -830,7 +923,7 @@ def _parse_sticker_object(value, field_name: str, required: bool = False):
     raise ValueError(f"{field_name} must be a valid JSON object.")
 
 
-@app.post("/api/sticker")
+@router.post("/api/sticker")
 async def create_sticker(
     request: Request,
     owner_id: int = Depends(current_owner_id),
@@ -1020,7 +1113,7 @@ async def create_sticker(
     )
 
 
-@app.get("/api/sticker/download/{run_id}")
+@router.get("/api/sticker/download/{run_id}")
 def download_sticker(
     run_id: str,
     owner_id: int = Depends(current_owner_id),
@@ -1028,7 +1121,7 @@ def download_sticker(
     return _artifact_response(owner_id, run_id, "sticker_pdf")
 
 
-@app.post("/api/buyers-guide")
+@router.post("/api/buyers-guide")
 def create_buyers_guide(
     request: BuyersGuideRequest,
     owner_id: int = Depends(current_owner_id),
@@ -1130,7 +1223,7 @@ def create_buyers_guide(
     )
 
 
-@app.get("/api/buyers-guide/download/{run_id}")
+@router.get("/api/buyers-guide/download/{run_id}")
 def download_buyers_guide(
     run_id: str,
     owner_id: int = Depends(current_owner_id),
@@ -1138,7 +1231,7 @@ def download_buyers_guide(
     return _artifact_response(owner_id, run_id, "buyers_guide_pdf")
 
 
-@app.get("/api/runs/export.csv")
+@router.get("/api/runs/export.csv")
 def export_run_history(
     vin: str | None = Query(None),
     dealership_id: int | None = Query(None),
@@ -1175,7 +1268,7 @@ def export_run_history(
     )
 
 
-@app.get("/api/runs")
+@router.get("/api/runs")
 def get_run_history(
     vin: str | None = Query(None),
     dealership_id: int | None = Query(None),
@@ -1202,7 +1295,7 @@ def get_run_history(
         connection.close()
 
 
-@app.get("/api/runs/{run_id}")
+@router.get("/api/runs/{run_id}")
 def get_saved_run(
     run_id: str,
     owner_id: int = Depends(current_owner_id),
@@ -1217,20 +1310,27 @@ def get_saved_run(
     return run
 
 
-@app.post("/api/runs/{run_id}/delivery", status_code=201)
+@router.post("/api/runs/{run_id}/delivery", status_code=201)
 def create_run_delivery_link(
     run_id: str,
+    request: Request,
     owner_id: int = Depends(current_owner_id),
 ):
     connection = connect_db()
     try:
         try:
-            return create_delivery_link(
+            delivery = create_delivery_link(
                 connection,
                 owner_id,
                 run_id,
                 RUNS_ROOT,
             )
+            return {
+                **delivery,
+                "public_base_url": (
+                    request.app.state.settings.public_base_url
+                ),
+            }
         except (
             DeliveryRunNotFoundError,
             RunHasNoArtifactsError,
@@ -1241,7 +1341,7 @@ def create_run_delivery_link(
         connection.close()
 
 
-@app.get("/api/runs/{run_id}/delivery")
+@router.get("/api/runs/{run_id}/delivery")
 def get_run_delivery_link_status(
     run_id: str,
     owner_id: int = Depends(current_owner_id),
@@ -1260,7 +1360,7 @@ def get_run_delivery_link_status(
         connection.close()
 
 
-@app.post("/api/runs/{run_id}/delivery/revoke")
+@router.post("/api/runs/{run_id}/delivery/revoke")
 def revoke_run_delivery_link(
     run_id: str,
     owner_id: int = Depends(current_owner_id),
@@ -1279,7 +1379,7 @@ def revoke_run_delivery_link(
         connection.close()
 
 
-@app.post("/api/runs/{run_id}/reopen")
+@router.post("/api/runs/{run_id}/reopen")
 def reopen_saved_run(
     run_id: str,
     owner_id: int = Depends(current_owner_id),
@@ -1301,7 +1401,7 @@ def reopen_saved_run(
         connection.close()
 
 
-@app.post("/api/runs/{run_id}/ready")
+@router.post("/api/runs/{run_id}/ready")
 def ready_saved_run(
     run_id: str,
     owner_id: int = Depends(current_owner_id),
@@ -1319,7 +1419,7 @@ def ready_saved_run(
         connection.close()
 
 
-@app.post("/api/runs/{run_id}/discard")
+@router.post("/api/runs/{run_id}/discard")
 def discard_saved_run(
     run_id: str,
     owner_id: int = Depends(current_owner_id),
@@ -1344,7 +1444,7 @@ def discard_saved_run(
     return {"ok": True}
 
 
-@app.get("/api/runs/{run_id}/artifacts/{artifact_type}")
+@router.get("/api/runs/{run_id}/artifacts/{artifact_type}")
 def download_run_artifact(
     run_id: str,
     artifact_type: str,
@@ -1359,7 +1459,7 @@ def download_run_artifact(
     return _artifact_response(owner_id, run_id, artifact_type)
 
 
-@app.get("/d/{token}")
+@router.get("/d/{token}")
 def public_delivery_page(token: str):
     connection = connect_db()
     try:
@@ -1399,12 +1499,12 @@ def public_delivery_page(token: str):
         connection.close()
 
 
-@app.get("/d/{token}/artifact/{artifact_type}")
+@router.get("/d/{token}/artifact/{artifact_type}")
 def reject_public_get_download(token: str, artifact_type: str):
     return public_unavailable_response()
 
 
-@app.post("/d/{token}/artifact/{artifact_type}")
+@router.post("/d/{token}/artifact/{artifact_type}")
 def public_artifact_download(token: str, artifact_type: str):
     connection = connect_db()
     try:
@@ -1428,9 +1528,85 @@ def public_artifact_download(token: str, artifact_type: str):
     )
 
 
-@app.api_route("/d/{unmatched_path:path}", methods=["GET", "POST"])
+@router.api_route(
+    "/d/{unmatched_path:path}",
+    methods=["GET", "POST"],
+    include_in_schema=False,
+)
 def unavailable_public_delivery_path(unmatched_path: str):
     return public_unavailable_response()
 
 
-app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+def create_app(settings: Settings | None = None) -> FastAPI:
+    """Build the application with validated runtime configuration."""
+
+    global RUNS_ROOT
+    canonical_settings = get_settings()
+    if settings is not None and settings != canonical_settings:
+        raise ConfigurationError(
+            "FastAPI must use the process-wide cached Settings object."
+        )
+    configured_at_build = canonical_settings
+    # Compatibility alias for existing integrations; its value is always
+    # sourced from the canonical Settings object.
+    RUNS_ROOT = configured_at_build.runs_dir
+
+    @asynccontextmanager
+    async def lifespan(app_instance: FastAPI):
+        runtime_settings = get_settings()
+        app_instance.state.settings = runtime_settings
+        app_instance.state.startup_completed = False
+        previous_umask = os.umask(0o077)
+        try:
+            LOGGER.info(
+                "LotKit startup configuration: environment=%s data_dir=%s "
+                "database_path=%s public_base_host=%s docs_enabled=%s",
+                runtime_settings.environment,
+                runtime_settings.data_dir,
+                runtime_settings.database_path,
+                runtime_settings.public_base_host,
+                runtime_settings.docs_enabled,
+            )
+            install_delivery_token_log_redaction()
+            ensure_persistent_directories(runtime_settings)
+            init_db(runtime_settings.database_path)
+            connection = connect_db(runtime_settings.database_path)
+            try:
+                get_or_create_default_owner(connection)
+            finally:
+                connection.close()
+
+            app_instance.state.startup_completed = True
+            yield
+        finally:
+            app_instance.state.startup_completed = False
+            os.umask(previous_umask)
+
+    docs_url = "/docs" if configured_at_build.docs_enabled else None
+    redoc_url = "/redoc" if configured_at_build.docs_enabled else None
+    openapi_url = (
+        "/openapi.json" if configured_at_build.docs_enabled else None
+    )
+    application = FastAPI(
+        debug=False,
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
+        lifespan=lifespan,
+    )
+    application.state.settings = configured_at_build
+    application.state.startup_completed = False
+    application.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=list(configured_at_build.trusted_hosts),
+    )
+    application.include_router(router)
+    application.mount(
+        "/",
+        StaticFiles(directory=STATIC_DIR, html=True),
+        name="static",
+    )
+    return application
+
+
+app = create_app()

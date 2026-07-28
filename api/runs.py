@@ -9,8 +9,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-RUNS_ROOT = BASE_DIR / "runs"
+from api.config import get_settings
 
 RUN_STATUSES = frozenset({"in_progress", "ready", "delivered"})
 ARTIFACT_TYPES = frozenset(
@@ -554,8 +553,24 @@ def _safe_uuid_run_directory(
     if not is_uuid4(run_id):
         raise InvalidRunDataError("Run ID must be a canonical UUID4.")
 
-    root = Path(runs_root) if runs_root is not None else RUNS_ROOT
+    settings = get_settings()
+    if runs_root is None:
+        root = settings.runs_dir
+    else:
+        root = Path(runs_root).expanduser()
+        if not root.is_absolute():
+            root = settings.project_root / root
     root = root.resolve()
+    configured_root = settings.runs_dir.resolve()
+    data_root = settings.data_dir.resolve()
+    if (
+        not configured_root.is_relative_to(data_root)
+        or (
+            settings.environment == "production"
+            and root != configured_root
+        )
+    ):
+        raise InvalidRunDataError("Unsafe Run storage root.")
     lexical_candidate = root / run_id
     candidate = lexical_candidate.resolve()
     if candidate != lexical_candidate or candidate.parent != root:
@@ -574,10 +589,10 @@ def create_run_directory(
     run_id: str,
     runs_root: str | Path | None = None,
 ) -> Path:
-    root = Path(runs_root) if runs_root is not None else RUNS_ROOT
-    root.mkdir(parents=True, exist_ok=True)
-    directory = _safe_uuid_run_directory(run_id, root)
-    directory.mkdir(exist_ok=False)
+    directory = _safe_uuid_run_directory(run_id, runs_root)
+    root = directory.parent
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory.mkdir(mode=0o700, exist_ok=False)
     return directory
 
 

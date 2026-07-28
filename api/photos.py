@@ -46,7 +46,7 @@ def build_run(
     run_id = f"{vin}_{created_utc}"
     root = Path(runs_root)
     run_directory = root / run_id
-    run_directory.mkdir(parents=True, exist_ok=False)
+    run_directory.mkdir(parents=True, exist_ok=False, mode=0o700)
 
     filenames: list[str] = []
     skipped: list[str] = []
@@ -63,7 +63,12 @@ def build_run(
             continue
 
         new_filename = sequenced_name(vin, len(filenames) + 1, extension)
-        (run_directory / new_filename).write_bytes(file_bytes)
+        photo_path = run_directory / new_filename
+        photo_path.write_bytes(file_bytes)
+        try:
+            photo_path.chmod(0o600)
+        except OSError:
+            pass
         filenames.append(new_filename)
 
     zip_filename = f"{vin}_photos.zip"
@@ -71,6 +76,10 @@ def build_run(
     with ZipFile(zip_file, "w", compression=ZIP_DEFLATED) as archive:
         for filename in filenames:
             archive.write(run_directory / filename, arcname=filename)
+    try:
+        zip_file.chmod(0o600)
+    except OSError:
+        pass
 
     report = {
         "vin": vin,
@@ -86,6 +95,10 @@ def build_run(
         json.dumps(report, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+    try:
+        report_file.chmod(0o600)
+    except OSError:
+        pass
 
     return {
         "run_id": run_id,

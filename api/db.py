@@ -1,14 +1,32 @@
 import sqlite3
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = BASE_DIR / "lotkit.db"
+from api.config import get_settings
 
 
 def connect_db(db_path: str | Path | None = None) -> sqlite3.Connection:
-    path = Path(db_path) if db_path is not None else DB_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
+    settings = get_settings()
+    if db_path is None:
+        path = settings.database_path
+    else:
+        path = Path(db_path).expanduser()
+        if not path.is_absolute():
+            path = settings.project_root / path
+        path = path.resolve()
+    if (
+        settings.environment == "production"
+        and path != settings.database_path.resolve()
+    ):
+        raise ValueError("Database path is outside configured storage.")
+
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    database_existed = path.exists()
     connection = sqlite3.connect(path)
+    if not database_existed:
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection

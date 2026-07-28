@@ -2614,12 +2614,14 @@
           if (
             typeof payload.public_path !== "string"
             || !payload.public_path.startsWith("/d/")
+            || typeof payload.public_base_url !== "string"
+            || !payload.public_base_url
           ) {
             throw new Error("The delivery link response was incomplete.");
           }
           const shareUrl = new URL(
             payload.public_path,
-            window.location.origin,
+            `${payload.public_base_url.replace(/\/+$/, "")}/`,
           ).href;
           ephemeralDeliveryUrl = {runId, url: shareUrl};
           displayedDeliveryStatus = {

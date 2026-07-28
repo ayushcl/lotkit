@@ -270,6 +270,10 @@ def build_artifact_manifest(
             immutable_filename = immutable_artifact_filename(artifact_type)
             destination = run_directory / immutable_filename
             shutil.copyfile(source, destination)
+            try:
+                destination.chmod(0o600)
+            except OSError:
+                pass
             created_files.append(destination)
 
             relative_path = (
