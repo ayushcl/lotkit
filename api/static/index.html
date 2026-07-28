@@ -559,6 +559,65 @@
         flex-wrap: wrap;
       }
 
+      .delivery-panel {
+        display: grid;
+        gap: 0.75rem;
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid #d9e2ec;
+      }
+
+      .delivery-panel h4,
+      .delivery-panel p {
+        margin: 0;
+      }
+
+      .delivery-url {
+        display: grid;
+        gap: 0.5rem;
+        padding: 0.85rem;
+        border: 1px solid #86efac;
+        border-radius: 8px;
+        background: #f0fdf4;
+      }
+
+      .delivery-url input {
+        width: 100%;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.85rem;
+      }
+
+      .delivery-meta {
+        display: grid;
+        grid-template-columns: max-content minmax(0, 1fr);
+        gap: 0.35rem 0.75rem;
+        margin: 0;
+      }
+
+      .delivery-meta dt {
+        color: #52606d;
+        font-weight: 700;
+      }
+
+      .delivery-meta dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+
+      .security-note,
+      .run-lock-note {
+        color: #52606d;
+        font-size: 0.88rem;
+        line-height: 1.45;
+      }
+
+      .run-lock-note {
+        padding: 0.75rem;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background: #f8fafc;
+      }
+
       [hidden] {
         display: none;
       }
@@ -774,7 +833,27 @@
           >
             Discard draft
           </button>
+          <button
+            id="manage-delivery-button"
+            class="secondary-button"
+            type="button"
+            hidden
+          >
+            Manage delivery
+          </button>
+          <button
+            id="reopen-current-run-button"
+            class="secondary-button"
+            type="button"
+            hidden
+          >
+            Reopen for changes
+          </button>
         </div>
+        <p id="current-run-lock-note" class="run-lock-note" hidden>
+          This delivered Run is locked. Reopening revokes any active link and
+          returns it to in-progress.
+        </p>
         <p
           id="current-run-error"
           class="error"
@@ -965,10 +1044,10 @@
           <select id="buyers-guide-version" required>
             <option value="" selected disabled>Choose a form</option>
             <option value="as_is">
-              "As Is" form (AS IS - NO DEALER WARRANTY)
+              As Is – No Dealer Warranty
             </option>
             <option value="implied_only">
-              "Implied Warranties Only" form (for states that require it)
+              Implied Warranties Only
             </option>
           </select>
           <p class="disclaimer">You select which form your dealer requires. LotKit fills vehicle info only (make, model, year, VIN). Complete all warranty sections per your dealer's instructions.</p>
@@ -1137,6 +1216,75 @@
           </div>
           <dl id="run-detail-fields"></dl>
           <div id="run-artifact-links" class="artifact-links"></div>
+          <section id="delivery-panel" class="delivery-panel">
+            <h4>Delivery</h4>
+            <div class="current-run-summary">
+              <span
+                id="delivery-state-badge"
+                class="status-badge"
+              >Loading…</span>
+            </div>
+            <p id="delivery-message" class="security-note"></p>
+            <dl id="delivery-meta" class="delivery-meta"></dl>
+            <div id="delivery-url-panel" class="delivery-url" hidden>
+              <label for="delivery-url">Shareable URL</label>
+              <input
+                id="delivery-url"
+                type="text"
+                readonly
+                autocomplete="off"
+                spellcheck="false"
+              >
+              <div class="inline-actions">
+                <button id="copy-delivery-link" type="button">
+                  Copy link
+                </button>
+                <a
+                  id="open-delivery-link"
+                  class="button-link"
+                  href=""
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Open link
+                </a>
+              </div>
+              <p class="security-note">
+                Copy this URL now. LotKit does not store the raw link for
+                security. If it is lost, create a replacement.
+              </p>
+            </div>
+            <div class="inline-actions">
+              <button id="detail-mark-ready" type="button" hidden>
+                Mark ready for delivery
+              </button>
+              <button id="create-delivery-link" type="button" hidden>
+                Create delivery link
+              </button>
+              <button
+                id="revoke-delivery-link"
+                class="danger-button"
+                type="button"
+                hidden
+              >
+                Revoke link
+              </button>
+              <button
+                id="reopen-run-button"
+                class="secondary-button"
+                type="button"
+                hidden
+              >
+                Reopen for changes
+              </button>
+            </div>
+            <p
+              id="delivery-error"
+              class="error"
+              role="alert"
+              aria-live="polite"
+            ></p>
+          </section>
         </article>
       </section>
     </main>
@@ -1221,6 +1369,15 @@
       const discardRunButton = document.querySelector(
         "#discard-run-button",
       );
+      const manageDeliveryButton = document.querySelector(
+        "#manage-delivery-button",
+      );
+      const reopenCurrentRunButton = document.querySelector(
+        "#reopen-current-run-button",
+      );
+      const currentRunLockNote = document.querySelector(
+        "#current-run-lock-note",
+      );
       const historyFilters = document.querySelector("#history-filters");
       const historyDealership = document.querySelector(
         "#history-dealership",
@@ -1245,6 +1402,32 @@
       const closeRunDetailButton = document.querySelector(
         "#close-run-detail",
       );
+      const deliveryStateBadge = document.querySelector(
+        "#delivery-state-badge",
+      );
+      const deliveryMessage = document.querySelector("#delivery-message");
+      const deliveryMeta = document.querySelector("#delivery-meta");
+      const deliveryUrlPanel = document.querySelector(
+        "#delivery-url-panel",
+      );
+      const deliveryUrlInput = document.querySelector("#delivery-url");
+      const copyDeliveryLinkButton = document.querySelector(
+        "#copy-delivery-link",
+      );
+      const openDeliveryLink = document.querySelector(
+        "#open-delivery-link",
+      );
+      const detailMarkReadyButton = document.querySelector(
+        "#detail-mark-ready",
+      );
+      const createDeliveryLinkButton = document.querySelector(
+        "#create-delivery-link",
+      );
+      const revokeDeliveryLinkButton = document.querySelector(
+        "#revoke-delivery-link",
+      );
+      const reopenRunButton = document.querySelector("#reopen-run-button");
+      const deliveryError = document.querySelector("#delivery-error");
       const ACTIVE_RUN_STORAGE_KEY = "lotkit.activeRun";
       const RUN_MISMATCH_MESSAGE =
         "This looks like a different vehicle — start a new car.";
@@ -1291,6 +1474,11 @@
       let activeRun = null;
       let activeRunDetail = null;
       let runHistory = [];
+      let generationLocked = false;
+      let displayedRunDetail = null;
+      let displayedDeliveryStatus = null;
+      let ephemeralDeliveryUrl = null;
+      let deliveryStatusRequest = 0;
 
       function setError(message) {
         errorMessage.textContent = message;
@@ -1323,6 +1511,9 @@
       }
 
       function outputRequestError(response, payload, fallback) {
+        if (payload?.error === "run_delivered") {
+          return "This Run is delivered and locked. Reopen it before making changes.";
+        }
         if (response.status === 409) {
           return RUN_MISMATCH_MESSAGE;
         }
@@ -1361,10 +1552,47 @@
         return String(status || "in_progress").replaceAll("_", " ");
       }
 
+      function buttonIsBusy(button) {
+        return button.dataset.busy === "true";
+      }
+
+      function updateGenerationControls() {
+        for (const field of vehicleForm.querySelectorAll(
+          "input, select, textarea",
+        )) {
+          field.disabled = generationLocked;
+        }
+        photosInput.disabled = generationLocked;
+        buyersGuideVersion.disabled = generationLocked;
+        photoDropzone.setAttribute(
+          "aria-disabled",
+          generationLocked ? "true" : "false",
+        );
+        stickerButton.disabled =
+          generationLocked || buttonIsBusy(stickerButton);
+        buyersGuideButton.disabled =
+          generationLocked
+          || buttonIsBusy(buyersGuideButton)
+          || !buyersGuideVersion.value;
+        packageButton.disabled =
+          generationLocked
+          || buttonIsBusy(packageButton)
+          || selectedPhotos.length === 0;
+        for (const card of photoGrid.querySelectorAll(".photo-card")) {
+          card.draggable = !generationLocked;
+        }
+      }
+
+      function setGenerationLocked(locked) {
+        generationLocked = locked;
+        updateGenerationControls();
+      }
+
       function updateCurrentRunPanel(detail = activeRunDetail) {
         if (!activeRun) {
           currentRunPanel.hidden = true;
           currentRunError.textContent = "";
+          setGenerationLocked(false);
           return;
         }
 
@@ -1374,6 +1602,11 @@
         currentRunStatus.textContent = statusLabel(status);
         markReadyButton.hidden = status !== "in_progress";
         discardRunButton.hidden = status !== "in_progress";
+        manageDeliveryButton.hidden =
+          status === "in_progress" || status === "loading";
+        reopenCurrentRunButton.hidden = status !== "delivered";
+        currentRunLockNote.hidden = status !== "delivered";
+        setGenerationLocked(status === "delivered" || status === "loading");
         currentRunPanel.hidden = false;
       }
 
@@ -1412,9 +1645,14 @@
           return;
         }
 
+        const showDetail =
+          !runDetail.hidden && runDetail.dataset.runId === runId;
+        if (ephemeralDeliveryUrl?.runId === runId) {
+          clearEphemeralDeliveryUrl();
+        }
         setActiveRun(runId, vinInput.value);
         await Promise.all([
-          loadRunDetail(runId, {show: false}),
+          loadRunDetail(runId, {show: showDetail}),
           loadRunHistory(),
         ]);
       }
@@ -1426,7 +1664,7 @@
           return;
         }
 
-        setActiveRun(stored.run_id, stored.vin);
+        setActiveRun(stored.run_id, stored.vin, "loading");
         loadRunDetail(stored.run_id, {show: false});
       }
 
@@ -1619,9 +1857,194 @@
         runDetailFields.append(term, description);
       }
 
+      function addDeliveryMetaField(label, value) {
+        if (!value) {
+          return;
+        }
+        const term = document.createElement("dt");
+        term.textContent = label;
+        const description = document.createElement("dd");
+        description.textContent = value;
+        deliveryMeta.append(term, description);
+      }
+
+      function clearEphemeralDeliveryUrl() {
+        ephemeralDeliveryUrl = null;
+        deliveryUrlInput.value = "";
+        openDeliveryLink.removeAttribute("href");
+        deliveryUrlPanel.hidden = true;
+      }
+
+      function renderDeliveryControls(run, deliveryStatus) {
+        const runStatus = run?.status || "in_progress";
+        const state = deliveryStatus?.state || "none";
+        if (
+          ephemeralDeliveryUrl?.runId === run.run_id
+          && state !== "active"
+        ) {
+          clearEphemeralDeliveryUrl();
+        }
+        const hasEphemeralUrl =
+          ephemeralDeliveryUrl?.runId === run.run_id
+          && state === "active";
+
+        deliveryStateBadge.dataset.status =
+          state === "active" ? "ready" : state;
+        deliveryStateBadge.textContent =
+          state === "none" ? "No link" : statusLabel(state);
+        deliveryMessage.textContent = "";
+        deliveryMeta.replaceChildren();
+        deliveryUrlPanel.hidden = true;
+        detailMarkReadyButton.hidden = runStatus !== "in_progress";
+        createDeliveryLinkButton.hidden = true;
+        revokeDeliveryLinkButton.hidden = state !== "active";
+        reopenRunButton.hidden = runStatus !== "delivered";
+        deliveryError.textContent = "";
+
+        addDeliveryMetaField(
+          "Token hint",
+          deliveryStatus?.token_hint
+            ? `Ends in ${deliveryStatus.token_hint}`
+            : "",
+        );
+        addDeliveryMetaField(
+          "Created",
+          deliveryStatus?.created_utc
+            ? formatDate(deliveryStatus.created_utc)
+            : "",
+        );
+        addDeliveryMetaField(
+          "Expires",
+          deliveryStatus?.expires_utc
+            ? formatDate(deliveryStatus.expires_utc)
+            : "",
+        );
+        addDeliveryMetaField(
+          "First opened",
+          deliveryStatus?.first_opened_utc
+            ? formatDate(deliveryStatus.first_opened_utc)
+            : "",
+        );
+        addDeliveryMetaField(
+          "First download started",
+          deliveryStatus?.first_download_started_utc
+            ? formatDate(deliveryStatus.first_download_started_utc)
+            : "",
+        );
+        addDeliveryMetaField(
+          "Revoked",
+          deliveryStatus?.revoked_utc
+            ? formatDate(deliveryStatus.revoked_utc)
+            : "",
+        );
+
+        if (hasEphemeralUrl) {
+          deliveryUrlInput.value = ephemeralDeliveryUrl.url;
+          openDeliveryLink.href = ephemeralDeliveryUrl.url;
+          deliveryUrlPanel.hidden = false;
+        } else if (state === "active") {
+          deliveryMessage.textContent =
+            "An active delivery link exists, but its URL is not stored for security. "
+            + "Create a replacement link to receive a new shareable URL.";
+        } else if (
+          state === "revoked"
+          && deliveryStatus?.revocation_reason === "outputs_changed"
+        ) {
+          deliveryMessage.textContent =
+            "Link revoked because outputs changed. Review the Run, mark it ready, and create a new link.";
+        } else if (state === "expired") {
+          deliveryMessage.textContent = "Expired";
+        } else if (state === "revoked") {
+          deliveryMessage.textContent = "Revoked";
+        } else {
+          deliveryMessage.textContent = "No delivery link has been created.";
+        }
+
+        if (runStatus === "ready") {
+          if (state === "active" && !hasEphemeralUrl) {
+            createDeliveryLinkButton.textContent =
+              "Create replacement link";
+            createDeliveryLinkButton.hidden = false;
+            deliveryMessage.textContent +=
+              " Creating a replacement revokes the current link.";
+          } else if (state !== "active") {
+            createDeliveryLinkButton.textContent = "Create delivery link";
+            createDeliveryLinkButton.hidden = false;
+          }
+        }
+
+        if (runStatus === "delivered") {
+          deliveryMessage.textContent +=
+            `${deliveryMessage.textContent ? " " : ""}`
+            + "Reopening revokes any active link and returns the Run to in-progress.";
+        }
+      }
+
+      function renderDeliveryLoading(run) {
+        deliveryStateBadge.removeAttribute("data-status");
+        deliveryStateBadge.textContent = "Loading…";
+        deliveryMessage.textContent = "Checking delivery-link status…";
+        deliveryMeta.replaceChildren();
+        deliveryUrlPanel.hidden = true;
+        detailMarkReadyButton.hidden = run.status !== "in_progress";
+        createDeliveryLinkButton.hidden = true;
+        revokeDeliveryLinkButton.hidden = true;
+        reopenRunButton.hidden = run.status !== "delivered";
+        deliveryError.textContent = "";
+      }
+
+      async function loadDeliveryStatus(runId) {
+        const requestNumber = ++deliveryStatusRequest;
+        const run = displayedRunDetail;
+        if (!run || run.run_id !== runId) {
+          return null;
+        }
+        renderDeliveryLoading(run);
+
+        try {
+          const response = await fetch(
+            `/api/runs/${encodeURIComponent(runId)}/delivery`,
+          );
+          const payload = await readResponsePayload(response);
+          if (!response.ok) {
+            throw new Error(
+              requestError(
+                response,
+                payload,
+                "Delivery status could not be loaded.",
+              ),
+            );
+          }
+          if (
+            requestNumber !== deliveryStatusRequest
+            || displayedRunDetail?.run_id !== runId
+          ) {
+            return null;
+          }
+          displayedDeliveryStatus = payload;
+          renderDeliveryControls(displayedRunDetail, payload);
+          return payload;
+        } catch (error) {
+          if (
+            requestNumber === deliveryStatusRequest
+            && displayedRunDetail?.run_id === runId
+          ) {
+            deliveryError.textContent = error instanceof Error
+              ? error.message
+              : "Delivery status could not be loaded.";
+          }
+          return null;
+        }
+      }
+
       function renderRunDetail(payload) {
         const vehicle = runVehicle(payload);
         const dealership = runDealership(payload);
+        if (displayedRunDetail?.run_id !== payload.run_id) {
+          clearEphemeralDeliveryUrl();
+        }
+        displayedRunDetail = payload;
+        displayedDeliveryStatus = null;
         runDetail.dataset.runId = payload.run_id || "";
         runDetailHeading.textContent = `Run details · ${payload.vin || ""}`;
         runDetailFields.replaceChildren();
@@ -1661,7 +2084,9 @@
             runArtifactLinks.append(link);
           }
         }
+        renderDeliveryLoading(payload);
         runDetail.hidden = false;
+        loadDeliveryStatus(payload.run_id);
       }
 
       async function loadRunDetail(runId, {show = true} = {}) {
@@ -2037,7 +2462,7 @@
         for (const [index, photo] of selectedPhotos.entries()) {
           const card = document.createElement("article");
           card.className = "photo-card";
-          card.draggable = true;
+          card.draggable = !generationLocked;
           card.dataset.photoId = photo.id;
 
           const image = document.createElement("img");
@@ -2057,13 +2482,19 @@
           photoGrid.append(card);
         }
 
-        packageButton.disabled = selectedPhotos.length === 0;
+        updateGenerationControls();
         photoCount.textContent = selectedPhotos.length
           ? `${selectedPhotos.length} selected`
           : "";
       }
 
       function setPhotoFiles(files) {
+        if (generationLocked && files.length) {
+          setPhotoError(
+            "This Run is delivered and locked. Reopen it before making changes.",
+          );
+          return;
+        }
         for (const photo of selectedPhotos) {
           URL.revokeObjectURL(photo.previewUrl);
         }
@@ -2107,16 +2538,16 @@
         vinInput.focus();
       }
 
-      async function markActiveRunReady() {
-        if (!activeRun) {
+      async function markRunReady(runId, button, errorTarget) {
+        if (!runId) {
           return;
         }
 
-        currentRunError.textContent = "";
-        markReadyButton.disabled = true;
+        errorTarget.textContent = "";
+        button.disabled = true;
         try {
           const response = await fetch(
-            `/api/runs/${encodeURIComponent(activeRun.run_id)}/ready`,
+            `/api/runs/${encodeURIComponent(runId)}/ready`,
             {method: "POST"},
           );
           const payload = await readResponsePayload(response);
@@ -2129,18 +2560,188 @@
               ),
             );
           }
-          activeRunDetail = payload;
-          updateCurrentRunPanel(payload);
-          await loadRunHistory();
-          if (!runDetail.hidden) {
-            renderRunDetail(payload);
-          }
+          await Promise.all([
+            loadRunHistory(),
+            loadRunDetail(runId, {
+              show:
+                !runDetail.hidden && runDetail.dataset.runId === runId,
+            }),
+          ]);
         } catch (error) {
-          currentRunError.textContent = error instanceof Error
+          errorTarget.textContent = error instanceof Error
             ? error.message
             : "The Run could not be marked ready.";
         } finally {
-          markReadyButton.disabled = false;
+          button.disabled = false;
+        }
+      }
+
+      function markActiveRunReady() {
+        return markRunReady(
+          activeRun?.run_id,
+          markReadyButton,
+          currentRunError,
+        );
+      }
+
+      async function createDeliveryLink() {
+        const runId = displayedRunDetail?.run_id;
+        if (!runId) {
+          return;
+        }
+
+        deliveryError.textContent = "";
+        createDeliveryLinkButton.disabled = true;
+        try {
+          const response = await fetch(
+            `/api/runs/${encodeURIComponent(runId)}/delivery`,
+            {method: "POST"},
+          );
+          const payload = await readResponsePayload(response);
+          if (!response.ok) {
+            const message = payload.error === "run_not_ready"
+              ? "Mark this Run ready before creating a delivery link."
+              : payload.error === "run_has_no_artifacts"
+                ? "Generate at least one output before creating a delivery link."
+                : requestError(
+                    response,
+                    payload,
+                    "The delivery link could not be created.",
+                  );
+            throw new Error(message);
+          }
+
+          if (
+            typeof payload.public_path !== "string"
+            || !payload.public_path.startsWith("/d/")
+          ) {
+            throw new Error("The delivery link response was incomplete.");
+          }
+          const shareUrl = new URL(
+            payload.public_path,
+            window.location.origin,
+          ).href;
+          ephemeralDeliveryUrl = {runId, url: shareUrl};
+          displayedDeliveryStatus = {
+            state: payload.state || "active",
+            token_hint: payload.token_hint,
+            expires_utc: payload.expires_utc,
+          };
+          renderDeliveryControls(
+            displayedRunDetail,
+            displayedDeliveryStatus,
+          );
+        } catch (error) {
+          deliveryError.textContent = error instanceof Error
+            ? error.message
+            : "The delivery link could not be created.";
+        } finally {
+          createDeliveryLinkButton.disabled = false;
+        }
+      }
+
+      async function revokeDeliveryLink() {
+        const runId = displayedRunDetail?.run_id;
+        if (!runId) {
+          return;
+        }
+
+        deliveryError.textContent = "";
+        revokeDeliveryLinkButton.disabled = true;
+        try {
+          const response = await fetch(
+            `/api/runs/${encodeURIComponent(runId)}/delivery/revoke`,
+            {method: "POST"},
+          );
+          const payload = await readResponsePayload(response);
+          if (!response.ok) {
+            throw new Error(
+              requestError(
+                response,
+                payload,
+                "The delivery link could not be revoked.",
+              ),
+            );
+          }
+          clearEphemeralDeliveryUrl();
+          await loadDeliveryStatus(runId);
+        } catch (error) {
+          deliveryError.textContent = error instanceof Error
+            ? error.message
+            : "The delivery link could not be revoked.";
+        } finally {
+          revokeDeliveryLinkButton.disabled = false;
+        }
+      }
+
+      async function reopenRun(runId, button, errorTarget) {
+        if (!runId) {
+          return;
+        }
+
+        errorTarget.textContent = "";
+        button.disabled = true;
+        try {
+          const response = await fetch(
+            `/api/runs/${encodeURIComponent(runId)}/reopen`,
+            {method: "POST"},
+          );
+          const payload = await readResponsePayload(response);
+          if (!response.ok) {
+            const message = payload.error === "run_not_delivered"
+              ? "Only a delivered Run needs to be reopened."
+              : requestError(
+                  response,
+                  payload,
+                  "The Run could not be reopened.",
+                );
+            throw new Error(message);
+          }
+
+          if (ephemeralDeliveryUrl?.runId === runId) {
+            clearEphemeralDeliveryUrl();
+          }
+          await Promise.all([
+            loadRunHistory(),
+            loadRunDetail(runId, {
+              show:
+                !runDetail.hidden && runDetail.dataset.runId === runId,
+            }),
+          ]);
+        } catch (error) {
+          errorTarget.textContent = error instanceof Error
+            ? error.message
+            : "The Run could not be reopened.";
+        } finally {
+          button.disabled = false;
+        }
+      }
+
+      async function copyDeliveryLink() {
+        const shareUrl = ephemeralDeliveryUrl?.url;
+        if (!shareUrl) {
+          return;
+        }
+
+        const originalLabel = copyDeliveryLinkButton.textContent;
+        try {
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(shareUrl);
+          } else {
+            deliveryUrlInput.focus();
+            deliveryUrlInput.select();
+            if (!document.execCommand("copy")) {
+              throw new Error("Copy is unavailable.");
+            }
+          }
+          copyDeliveryLinkButton.textContent = "Copied";
+        } catch {
+          deliveryError.textContent =
+            "Copy was unavailable. Select the URL and copy it manually.";
+        } finally {
+          window.setTimeout(() => {
+            copyDeliveryLinkButton.textContent = originalLabel;
+          }, 1500);
         }
       }
 
@@ -2179,7 +2780,7 @@
             runDetail.dataset.runId === discardedRunId
             || runDetailHeading.textContent.includes(discardedRunId)
           ) {
-            runDetail.hidden = true;
+            closeDisplayedRunDetail();
           }
           await loadRunHistory();
         } catch (error) {
@@ -2194,14 +2795,74 @@
       newCarButton.addEventListener("click", resetCurrentCar);
       markReadyButton.addEventListener("click", markActiveRunReady);
       discardRunButton.addEventListener("click", discardActiveRun);
-      refreshHistoryButton.addEventListener("click", loadRunHistory);
-      closeRunDetailButton.addEventListener("click", () => {
+      manageDeliveryButton.addEventListener("click", async () => {
+        if (!activeRun) {
+          return;
+        }
+        await loadRunDetail(activeRun.run_id);
+        if (!runDetail.hidden) {
+          runDetail.scrollIntoView({behavior: "smooth", block: "start"});
+        }
+      });
+      reopenCurrentRunButton.addEventListener("click", () => {
+        reopenRun(
+          activeRun?.run_id,
+          reopenCurrentRunButton,
+          currentRunError,
+        );
+      });
+      detailMarkReadyButton.addEventListener("click", () => {
+        markRunReady(
+          displayedRunDetail?.run_id,
+          detailMarkReadyButton,
+          deliveryError,
+        );
+      });
+      createDeliveryLinkButton.addEventListener(
+        "click",
+        createDeliveryLink,
+      );
+      revokeDeliveryLinkButton.addEventListener(
+        "click",
+        revokeDeliveryLink,
+      );
+      reopenRunButton.addEventListener("click", () => {
+        reopenRun(
+          displayedRunDetail?.run_id,
+          reopenRunButton,
+          deliveryError,
+        );
+      });
+      copyDeliveryLinkButton.addEventListener("click", copyDeliveryLink);
+      refreshHistoryButton.addEventListener("click", async () => {
+        await loadRunHistory();
+        const displayedRunId = displayedRunDetail?.run_id;
+        if (displayedRunId) {
+          await loadRunDetail(displayedRunId);
+        }
+        if (
+          activeRun?.run_id
+          && activeRun.run_id !== displayedRunId
+        ) {
+          await loadRunDetail(activeRun.run_id, {show: false});
+        }
+      });
+
+      function closeDisplayedRunDetail() {
+        deliveryStatusRequest += 1;
+        clearEphemeralDeliveryUrl();
+        displayedRunDetail = null;
+        displayedDeliveryStatus = null;
         runDetail.hidden = true;
+      }
+
+      closeRunDetailButton.addEventListener("click", () => {
+        closeDisplayedRunDetail();
       });
 
       historyFilters.addEventListener("submit", (event) => {
         event.preventDefault();
-        runDetail.hidden = true;
+        closeDisplayedRunDetail();
         loadRunHistory();
       });
 
@@ -2209,7 +2870,7 @@
       historyFilters.addEventListener("input", updateCsvLink);
       clearHistoryFiltersButton.addEventListener("click", () => {
         historyFilters.reset();
-        runDetail.hidden = true;
+        closeDisplayedRunDetail();
         updateCsvLink();
         loadRunHistory();
       });
@@ -2323,6 +2984,11 @@
       stickerButton.addEventListener("click", async () => {
         stickerError.textContent = "";
         stickerResult.hidden = true;
+        if (generationLocked) {
+          stickerError.textContent =
+            "This Run is delivered and locked. Reopen it before making changes.";
+          return;
+        }
 
         const vehicle = {};
         for (const field of decodedFields) {
@@ -2360,7 +3026,8 @@
           requestData.append("logo", dealerLogo.files[0]);
         }
 
-        stickerButton.disabled = true;
+        stickerButton.dataset.busy = "true";
+        updateGenerationControls();
         stickerButton.textContent = "Generating…";
 
         try {
@@ -2391,13 +3058,14 @@
             : "The window sticker could not be generated. Please try again.";
           stickerError.textContent = message;
         } finally {
-          stickerButton.disabled = false;
+          delete stickerButton.dataset.busy;
           stickerButton.textContent = "Generate window sticker";
+          updateGenerationControls();
         }
       });
 
       buyersGuideVersion.addEventListener("change", () => {
-        buyersGuideButton.disabled = !buyersGuideVersion.value;
+        updateGenerationControls();
         buyersGuideError.textContent = "";
         buyersGuideResult.hidden = true;
         buyersGuidePreview.removeAttribute("src");
@@ -2406,6 +3074,11 @@
       buyersGuideButton.addEventListener("click", async () => {
         buyersGuideError.textContent = "";
         buyersGuideResult.hidden = true;
+        if (generationLocked) {
+          buyersGuideError.textContent =
+            "This Run is delivered and locked. Reopen it before making changes.";
+          return;
+        }
 
         if (!buyersGuideVersion.value) {
           buyersGuideError.textContent =
@@ -2413,7 +3086,8 @@
           return;
         }
 
-        buyersGuideButton.disabled = true;
+        buyersGuideButton.dataset.busy = "true";
+        updateGenerationControls();
         buyersGuideButton.textContent = "Generating…";
 
         try {
@@ -2475,8 +3149,9 @@
             ? error.message
             : "The Buyers Guide could not be generated. Please try again.";
         } finally {
-          buyersGuideButton.disabled = !buyersGuideVersion.value;
+          delete buyersGuideButton.dataset.busy;
           buyersGuideButton.textContent = "Generate Buyers Guide";
+          updateGenerationControls();
         }
       });
 
@@ -2503,6 +3178,10 @@
       });
 
       photoGrid.addEventListener("dragstart", (event) => {
+        if (generationLocked) {
+          event.preventDefault();
+          return;
+        }
         const card = event.target.closest(".photo-card");
         if (!card) {
           return;
@@ -2515,6 +3194,9 @@
       });
 
       photoGrid.addEventListener("dragover", (event) => {
+        if (generationLocked) {
+          return;
+        }
         event.preventDefault();
         const draggedCard = photoGrid.querySelector(
           `[data-photo-id="${draggedPhotoId}"]`,
@@ -2552,6 +3234,13 @@
         packageResult.hidden = true;
         updatePhotoStateFromGrid();
 
+        if (generationLocked) {
+          setPhotoError(
+            "This Run is delivered and locked. Reopen it before making changes.",
+          );
+          return;
+        }
+
         if (!selectedPhotos.length) {
           setPhotoError("Choose at least one photo to package.");
           return;
@@ -2577,7 +3266,8 @@
           requestData.append("photos", photo.file, photo.file.name);
         }
 
-        packageButton.disabled = true;
+        packageButton.dataset.busy = "true";
+        updateGenerationControls();
         packageButton.textContent = "Packaging…";
 
         try {
@@ -2617,8 +3307,9 @@
             : "The photos could not be packaged. Please try again.";
           setPhotoError(message);
         } finally {
-          packageButton.disabled = false;
+          delete packageButton.dataset.busy;
           packageButton.textContent = "Package photos";
+          updateGenerationControls();
         }
       });
 

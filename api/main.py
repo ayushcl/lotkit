@@ -1,5 +1,7 @@
+import html
 import json
 import shutil
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -16,7 +18,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -24,6 +26,23 @@ from api.auth import current_owner_id, get_or_create_default_owner
 from api.buyers_guide import render_buyers_guide
 from api.db import connect_db, init_db
 from api.decode import VinDecodeError, decode_vin
+from api.delivery import (
+    DeliveryRunNotFoundError,
+    RunHasNoArtifactsError,
+    RunNotDeliveredError,
+    RunNotReadyError,
+    begin_public_artifact_download,
+    create_delivery_link,
+    get_owner_delivery_status,
+    get_usable_delivery_link_by_token,
+    install_delivery_token_log_redaction,
+    manifest_artifact_types,
+    public_security_headers,
+    public_unavailable_response,
+    reopen_delivered_run,
+    resolve_manifest_artifact,
+    revoke_owner_delivery_link,
+)
 from api.dealerships import (
     InvalidLogoError,
     create_profile,
@@ -42,6 +61,7 @@ from api.runs import (
     DealershipNotFoundError,
     InvalidRunDataError,
     RunConflictError,
+    RunDeliveredError,
     RunNotFoundError,
     RunStatusConflictError,
     RunTarget,
@@ -68,6 +88,7 @@ load_dotenv(BASE_DIR / ".env")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    install_delivery_token_log_redaction()
     init_db()
     connection = connect_db()
     try:
@@ -139,6 +160,11 @@ def _run_error_response(exc: Exception) -> JSONResponse:
         return JSONResponse(
             status_code=404,
             content={"error": "run_not_found", "detail": str(exc)},
+        )
+    if isinstance(exc, RunDeliveredError):
+        return JSONResponse(
+            status_code=409,
+            content={"error": "run_delivered"},
         )
     if isinstance(exc, RunStatusConflictError):
         return JSONResponse(
@@ -242,6 +268,18 @@ def _write_run_file(target: RunTarget, filename: str, content: bytes) -> Path:
     return destination
 
 
+def _artifact_filename(
+    target: RunTarget,
+    stem: str,
+    suffix: str,
+) -> str:
+    """Give every regeneration an immutable, opaque generation filename."""
+
+    if target.is_new:
+        return f"{stem}{suffix}"
+    return f"{stem}_{uuid.uuid4().hex}{suffix}"
+
+
 def _remove_new_run_folder(target: RunTarget) -> None:
     if not target.is_new:
         return
@@ -286,6 +324,108 @@ def _artifact_response(
         content_disposition_type=(
             "attachment" if artifact_type == "photos_zip" else "inline"
         ),
+    )
+
+
+def _delivery_error_response(exc: Exception) -> JSONResponse:
+    if isinstance(exc, DeliveryRunNotFoundError):
+        return JSONResponse(
+            status_code=404,
+            content={"error": "run_not_found"},
+        )
+    if isinstance(exc, RunNotReadyError):
+        return JSONResponse(
+            status_code=409,
+            content={"error": "run_not_ready"},
+        )
+    if isinstance(exc, RunHasNoArtifactsError):
+        return JSONResponse(
+            status_code=409,
+            content={"error": "run_has_no_artifacts"},
+        )
+    if isinstance(exc, RunNotDeliveredError):
+        return JSONResponse(
+            status_code=409,
+            content={"error": "run_not_delivered"},
+        )
+    raise exc
+
+
+def _public_delivery_page(
+    token: str,
+    link: Any,
+    artifact_types: list[str],
+) -> HTMLResponse:
+    try:
+        vehicle = json.loads(link["run_vehicle_json"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        vehicle = {}
+    if not isinstance(vehicle, dict):
+        vehicle = {}
+
+    year = html.escape(str(vehicle.get("year") or ""), quote=True)
+    make = html.escape(str(vehicle.get("make") or ""), quote=True)
+    model = html.escape(str(vehicle.get("model") or ""), quote=True)
+    vehicle_name = " ".join(
+        value for value in (year, make, model) if value
+    ) or "Vehicle"
+    vin = str(link["run_vin"] or "")
+    vin_suffix = html.escape(vin[-4:], quote=True)
+    safe_token = html.escape(token, quote=True)
+
+    labels = {
+        "photos_zip": ("Vehicle photos", "Download vehicle photos"),
+        "sticker_pdf": ("Window sticker", "Download window sticker"),
+        "buyers_guide_pdf": (
+            "Draft Buyers Guide",
+            "Download Draft Buyers Guide",
+        ),
+    }
+    download_controls: list[str] = []
+    for artifact_type in artifact_types:
+        label, button = labels[artifact_type]
+        warning = ""
+        if artifact_type == "buyers_guide_pdf":
+            warning = (
+                "<p class=\"warning\">Draft Buyers Guide — the dealership "
+                "must complete all applicable warranty and dealer-contact "
+                "fields before display.</p>"
+            )
+        download_controls.append(
+            "<section class=\"file\">"
+            f"<h2>{label}</h2>"
+            f"{warning}"
+            f"<form method=\"post\" action=\"/d/{safe_token}/artifact/"
+            f"{artifact_type}\">"
+            f"<button type=\"submit\">{button}</button>"
+            "</form></section>"
+        )
+
+    page = (
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>Vehicle files</title><style>"
+        "body{font-family:system-ui,sans-serif;background:#f6f7f9;"
+        "color:#18202a;margin:0;padding:2rem 1rem;line-height:1.5}"
+        "main{max-width:42rem;margin:auto;background:white;padding:2rem;"
+        "border:1px solid #d8dde5;border-radius:.75rem}"
+        "h1{margin-top:0}.vehicle{font-size:1.1rem}.file{padding:1rem 0;"
+        "border-top:1px solid #e3e7ec}.file h2{font-size:1rem}"
+        "button{font:inherit;font-weight:650;padding:.65rem 1rem;"
+        "border:0;border-radius:.4rem;background:#174ea6;color:white;"
+        "cursor:pointer}.warning{padding:.9rem;background:#fff4d6;"
+        "border-left:4px solid #b06000}.note{color:#4f5965}</style>"
+        "</head><body><main><h1>Vehicle files</h1>"
+        f"<p class=\"vehicle\"><strong>{vehicle_name}</strong><br>"
+        f"VIN ending {vin_suffix}</p>"
+        f"{''.join(download_controls)}"
+        "<p class=\"note\">This link provides access to files for this "
+        "vehicle. Do not forward it unnecessarily.</p>"
+        "</main></body></html>"
+    )
+    return HTMLResponse(
+        content=page,
+        headers=public_security_headers(html_response=True),
     )
 
 
@@ -586,6 +726,12 @@ async def package_photos(
 
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     try:
+        original_zip_filename = f"{normalized_vin}_photos.zip"
+        zip_filename = _artifact_filename(
+            target,
+            f"{normalized_vin}_photos",
+            ".zip",
+        )
         with TemporaryDirectory(
             prefix=f".{target.run_id}-photos-",
             dir=RUNS_ROOT,
@@ -605,9 +751,13 @@ async def package_photos(
             else:
                 run_directory.mkdir(parents=False, exist_ok=True)
                 for staged_file in staged_directory.iterdir():
-                    staged_file.replace(run_directory / staged_file.name)
+                    destination_name = (
+                        zip_filename
+                        if staged_file.name == original_zip_filename
+                        else staged_file.name
+                    )
+                    staged_file.replace(run_directory / destination_name)
 
-        zip_filename = f"{normalized_vin}_photos.zip"
         _record_output(
             owner_id,
             target,
@@ -631,6 +781,14 @@ async def package_photos(
                 else UNSET
             ),
         )
+    except (
+        InvalidRunDataError,
+        RunConflictError,
+        RunNotFoundError,
+        RunStatusConflictError,
+    ) as exc:
+        _remove_new_run_folder(target)
+        return _run_error_response(exc)
     except Exception:
         _remove_new_run_folder(target)
         raise
@@ -816,7 +974,11 @@ async def create_sticker(
         price,
         extras_data,
     )
-    sticker_filename = f"{normalized_vin}_sticker.pdf"
+    sticker_filename = _artifact_filename(
+        target,
+        f"{normalized_vin}_sticker",
+        ".pdf",
+    )
     try:
         _write_run_file(target, sticker_filename, pdf_bytes)
         _record_output(
@@ -837,6 +999,14 @@ async def create_sticker(
             ),
             dealership_snapshot=effective_snapshot,
         )
+    except (
+        InvalidRunDataError,
+        RunConflictError,
+        RunNotFoundError,
+        RunStatusConflictError,
+    ) as exc:
+        _remove_new_run_folder(target)
+        return _run_error_response(exc)
     except Exception:
         _remove_new_run_folder(target)
         raise
@@ -901,8 +1071,10 @@ def create_buyers_guide(
         request.version,
     )
 
-    buyers_guide_filename = (
-        f"DRAFT_buyers_guide_{normalized_vin}_{request.version}.pdf"
+    buyers_guide_filename = _artifact_filename(
+        target,
+        f"DRAFT_buyers_guide_{normalized_vin}_{request.version}",
+        ".pdf",
     )
     vehicle_snapshot = {
         **(request.vehicle or {}),
@@ -937,6 +1109,14 @@ def create_buyers_guide(
                 dealership_snapshot if dealership_id is not None else UNSET
             ),
         )
+    except (
+        InvalidRunDataError,
+        RunConflictError,
+        RunNotFoundError,
+        RunStatusConflictError,
+    ) as exc:
+        _remove_new_run_folder(target)
+        return _run_error_response(exc)
     except Exception:
         _remove_new_run_folder(target)
         raise
@@ -1037,6 +1217,90 @@ def get_saved_run(
     return run
 
 
+@app.post("/api/runs/{run_id}/delivery", status_code=201)
+def create_run_delivery_link(
+    run_id: str,
+    owner_id: int = Depends(current_owner_id),
+):
+    connection = connect_db()
+    try:
+        try:
+            return create_delivery_link(
+                connection,
+                owner_id,
+                run_id,
+                RUNS_ROOT,
+            )
+        except (
+            DeliveryRunNotFoundError,
+            RunHasNoArtifactsError,
+            RunNotReadyError,
+        ) as exc:
+            return _delivery_error_response(exc)
+    finally:
+        connection.close()
+
+
+@app.get("/api/runs/{run_id}/delivery")
+def get_run_delivery_link_status(
+    run_id: str,
+    owner_id: int = Depends(current_owner_id),
+):
+    connection = connect_db()
+    try:
+        try:
+            return get_owner_delivery_status(
+                connection,
+                owner_id,
+                run_id,
+            )
+        except DeliveryRunNotFoundError as exc:
+            return _delivery_error_response(exc)
+    finally:
+        connection.close()
+
+
+@app.post("/api/runs/{run_id}/delivery/revoke")
+def revoke_run_delivery_link(
+    run_id: str,
+    owner_id: int = Depends(current_owner_id),
+):
+    connection = connect_db()
+    try:
+        try:
+            return revoke_owner_delivery_link(
+                connection,
+                owner_id,
+                run_id,
+            )
+        except DeliveryRunNotFoundError as exc:
+            return _delivery_error_response(exc)
+    finally:
+        connection.close()
+
+
+@app.post("/api/runs/{run_id}/reopen")
+def reopen_saved_run(
+    run_id: str,
+    owner_id: int = Depends(current_owner_id),
+):
+    connection = connect_db()
+    try:
+        try:
+            return reopen_delivered_run(
+                connection,
+                owner_id,
+                run_id,
+            )
+        except (
+            DeliveryRunNotFoundError,
+            RunNotDeliveredError,
+        ) as exc:
+            return _delivery_error_response(exc)
+    finally:
+        connection.close()
+
+
 @app.post("/api/runs/{run_id}/ready")
 def ready_saved_run(
     run_id: str,
@@ -1093,6 +1357,80 @@ def download_run_artifact(
     }:
         raise HTTPException(status_code=404, detail="Run artifact not found.")
     return _artifact_response(owner_id, run_id, artifact_type)
+
+
+@app.get("/d/{token}")
+def public_delivery_page(token: str):
+    connection = connect_db()
+    try:
+        link = get_usable_delivery_link_by_token(
+            connection,
+            token,
+        )
+        if link is None:
+            return public_unavailable_response()
+
+        available_types = [
+            artifact_type
+            for artifact_type in manifest_artifact_types(link)
+            if resolve_manifest_artifact(
+                link,
+                artifact_type,
+                RUNS_ROOT,
+            )
+            is not None
+        ]
+        if not available_types:
+            return public_unavailable_response()
+
+        opened_link = get_usable_delivery_link_by_token(
+            connection,
+            token,
+            mark_opened=True,
+        )
+        if opened_link is None:
+            return public_unavailable_response()
+        return _public_delivery_page(
+            token,
+            opened_link,
+            available_types,
+        )
+    finally:
+        connection.close()
+
+
+@app.get("/d/{token}/artifact/{artifact_type}")
+def reject_public_get_download(token: str, artifact_type: str):
+    return public_unavailable_response()
+
+
+@app.post("/d/{token}/artifact/{artifact_type}")
+def public_artifact_download(token: str, artifact_type: str):
+    connection = connect_db()
+    try:
+        artifact = begin_public_artifact_download(
+            connection,
+            token,
+            artifact_type,
+            RUNS_ROOT,
+        )
+    finally:
+        connection.close()
+
+    if artifact is None:
+        return public_unavailable_response()
+    return FileResponse(
+        artifact.path,
+        media_type=artifact.content_type,
+        filename=artifact.download_name,
+        content_disposition_type="attachment",
+        headers=public_security_headers(),
+    )
+
+
+@app.api_route("/d/{unmatched_path:path}", methods=["GET", "POST"])
+def unavailable_public_delivery_path(unmatched_path: str):
+    return public_unavailable_response()
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

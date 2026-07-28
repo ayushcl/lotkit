@@ -66,6 +66,36 @@ def init_db(db_path: str | Path | None = None) -> None:
 
             CREATE INDEX IF NOT EXISTS runs_owner_updated_utc_idx
             ON runs(owner_id, updated_utc);
+
+            CREATE TABLE IF NOT EXISTS delivery_links (
+                id INTEGER PRIMARY KEY,
+                owner_id INTEGER NOT NULL REFERENCES users(id),
+                run_id TEXT NOT NULL
+                    REFERENCES runs(run_id) ON DELETE CASCADE,
+                token_hash TEXT NOT NULL UNIQUE,
+                token_hint TEXT NOT NULL,
+                artifact_manifest_json TEXT NOT NULL,
+                created_utc TEXT NOT NULL,
+                expires_utc TEXT NOT NULL,
+                first_opened_utc TEXT,
+                first_download_started_utc TEXT,
+                revoked_utc TEXT,
+                revocation_reason TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS delivery_links_token_hash_idx
+            ON delivery_links(token_hash);
+
+            CREATE INDEX IF NOT EXISTS delivery_links_run_id_idx
+            ON delivery_links(run_id);
+
+            CREATE INDEX IF NOT EXISTS delivery_links_owner_id_idx
+            ON delivery_links(owner_id);
+
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                ux_delivery_links_one_unrevoked
+            ON delivery_links(run_id)
+            WHERE revoked_utc IS NULL;
             """
         )
         connection.commit()

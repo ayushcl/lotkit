@@ -1,3 +1,4 @@
+import re
 import uuid
 from io import BytesIO
 
@@ -278,3 +279,27 @@ def test_buyers_guide_ui_has_required_draft_notices() -> None:
     assert response.status_code == 200
     assert response.text.count(DRAFT_WARNING) == 2
     assert PRINT_GUIDANCE in response.text
+
+    selector_match = re.search(
+        r'<select id="buyers-guide-version" required>(.*?)</select>',
+        response.text,
+        flags=re.DOTALL,
+    )
+    assert selector_match is not None
+    selector_html = selector_match.group(1)
+    assert (
+        '<option value="" selected disabled>Choose a form</option>'
+        in selector_html
+    )
+    assert not re.search(
+        r'<option value="(?:as_is|implied_only)"[^>]*\bselected\b',
+        selector_html,
+    )
+    selector_text = re.sub(r"\s+", " ", selector_html)
+    assert "As Is – No Dealer Warranty" in selector_text
+    assert "Implied Warranties Only" in selector_text
+    assert (
+        '<button id="buyers-guide-button" type="button" disabled>'
+        in response.text
+    )
+    assert 'buyersGuideVersion.value = "";' in response.text

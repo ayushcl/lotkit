@@ -68,6 +68,10 @@ class RunStatusConflictError(RunConflictError):
     """The requested transition is not valid for the Run's status."""
 
 
+class RunDeliveredError(RunStatusConflictError):
+    """A delivered Run must be explicitly reopened before it can change."""
+
+
 class DealershipNotFoundError(RunError):
     """The dealership does not exist for the current owner."""
 
@@ -290,6 +294,10 @@ def prepare_run_target(
         row = get_run_row(connection, owner_id, requested_run_id)
         if row is None:
             raise RunNotFoundError("Run not found.")
+        if row["status"] == "delivered":
+            raise RunDeliveredError(
+                "Delivered Runs must be reopened before they can change."
+            )
 
         stored_dealership_id = row["dealership_id"]
         if (
@@ -348,70 +356,87 @@ def record_successful_output(
     """
 
     normalized_outputs = normalize_output_updates(output_updates)
-    existing = get_run_row(connection, owner_id, target.run_id)
+    if vehicle is not UNSET and vehicle is not None and not isinstance(
+        vehicle, Mapping
+    ):
+        raise InvalidRunDataError("Vehicle must be a JSON object.")
+    normalized_order = (
+        UNSET
+        if photo_order is UNSET
+        else normalize_photo_order(photo_order)
+    )
 
-    if target.is_new:
-        if existing is not None:
-            raise RunConflictError("Run ID is already in use.")
-        if not is_uuid4(target.run_id):
-            raise InvalidRunDataError("New Run ID must be a canonical UUID4.")
-    else:
-        if existing is None:
-            raise RunNotFoundError("Run not found.")
-        if (
-            existing["vin"] != vin
-            or existing["dealership_id"] != dealership_id
-        ):
-            raise RunConflictError(
-                "Run VIN or dealership does not match this vehicle."
+    try:
+        # This is the single mutation transaction for every output type.
+        # It rechecks lifecycle state after generation has succeeded, so a
+        # concurrent public delivery can still lock the Run before mutation.
+        connection.execute("BEGIN IMMEDIATE")
+        existing = get_run_row(connection, owner_id, target.run_id)
+
+        if target.is_new:
+            if existing is not None:
+                raise RunConflictError("Run ID is already in use.")
+            if not is_uuid4(target.run_id):
+                raise InvalidRunDataError(
+                    "New Run ID must be a canonical UUID4."
+                )
+        else:
+            if existing is None:
+                raise RunNotFoundError("Run not found.")
+            if existing["status"] == "delivered":
+                raise RunDeliveredError(
+                    "Delivered Runs must be reopened before they can change."
+                )
+            if (
+                existing["vin"] != vin
+                or existing["dealership_id"] != dealership_id
+            ):
+                raise RunConflictError(
+                    "Run VIN or dealership does not match this vehicle."
+                )
+
+        old_outputs = (
+            parse_json_object(existing["outputs_json"]) if existing else {}
+        )
+        outputs = {**old_outputs, **normalized_outputs}
+
+        if vehicle is UNSET:
+            vehicle_json = existing["vehicle_json"] if existing else None
+        elif vehicle is None:
+            vehicle_json = None
+        else:
+            vehicle_json = serialize_json(dict(vehicle))
+
+        if normalized_order is UNSET:
+            photo_order_json = (
+                existing["photo_order_json"] if existing else None
+            )
+        else:
+            photo_order_json = (
+                serialize_json(normalized_order)
+                if normalized_order is not None
+                else None
             )
 
-    old_outputs = (
-        parse_json_object(existing["outputs_json"]) if existing else {}
-    )
-    outputs = {**old_outputs, **normalized_outputs}
+        if dealership_snapshot is not UNSET:
+            resolved_dealership_snapshot = normalize_dealership_snapshot(
+                dealership_snapshot
+            )
+        elif dealership_id is not None:
+            resolved_dealership_snapshot = get_dealership_snapshot(
+                connection,
+                owner_id,
+                dealership_id,
+            )
+        elif existing is not None:
+            # ON DELETE SET NULL must not erase the historical snapshot.
+            resolved_dealership_snapshot = parse_json_object(
+                existing["dealership_snapshot_json"]
+            )
+        else:
+            resolved_dealership_snapshot = {}
 
-    if vehicle is UNSET:
-        vehicle_json = existing["vehicle_json"] if existing else None
-    elif vehicle is None:
-        vehicle_json = None
-    elif isinstance(vehicle, Mapping):
-        vehicle_json = serialize_json(dict(vehicle))
-    else:
-        raise InvalidRunDataError("Vehicle must be a JSON object.")
-
-    if photo_order is UNSET:
-        photo_order_json = (
-            existing["photo_order_json"] if existing else None
-        )
-    else:
-        normalized_order = normalize_photo_order(photo_order)
-        photo_order_json = (
-            serialize_json(normalized_order)
-            if normalized_order is not None
-            else None
-        )
-
-    if dealership_snapshot is not UNSET:
-        resolved_dealership_snapshot = normalize_dealership_snapshot(
-            dealership_snapshot
-        )
-    elif dealership_id is not None:
-        resolved_dealership_snapshot = get_dealership_snapshot(
-            connection,
-            owner_id,
-            dealership_id,
-        )
-    elif existing is not None:
-        # ON DELETE SET NULL must not erase the historical snapshot.
-        resolved_dealership_snapshot = parse_json_object(
-            existing["dealership_snapshot_json"]
-        )
-    else:
-        resolved_dealership_snapshot = {}
-
-    timestamp = utc_now()
-    try:
+        timestamp = utc_now()
         if target.is_new:
             connection.execute(
                 """
@@ -458,6 +483,17 @@ def record_successful_output(
                 ),
             )
         else:
+            # Successful changes invalidate every outstanding bearer link.
+            # Historical rows remain available for audit.
+            connection.execute(
+                """
+                UPDATE delivery_links
+                SET revoked_utc = ?,
+                    revocation_reason = 'outputs_changed'
+                WHERE run_id = ? AND revoked_utc IS NULL
+                """,
+                (timestamp, target.run_id),
+            )
             connection.execute(
                 """
                 UPDATE runs
@@ -468,6 +504,10 @@ def record_successful_output(
                     interior_colour = ?,
                     photo_order_json = ?,
                     outputs_json = ?,
+                    status = CASE
+                        WHEN status = 'ready' THEN 'in_progress'
+                        ELSE status
+                    END,
                     updated_utc = ?
                 WHERE run_id = ? AND owner_id = ?
                 """,
