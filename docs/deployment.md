@@ -1,115 +1,151 @@
 # LotKit deployment notes
 
-## Deployment is blocked
+## Controlled-beta status
 
-Do not deploy this build publicly.
+Phase 5b adds invite-only photographer authentication. This implementation
+does not deploy the application, and the committed `render.yaml` keeps
+automatic deploys disabled. Treat deployment as a separate reviewed
+operation.
 
-Phase 5b must replace the implicit local-owner dependency with real
-authentication before any public deployment. The committed `render.yaml`
-has automatic deploys disabled; do not apply the Blueprint before that
-authentication work is complete.
+There is no public signup, automated password reset, email verification,
+OAuth, or JWT authentication. Before public launch, add robust persistent
+login throttling. Do not substitute a process-local in-memory limiter or a
+fixed per-account lockout: either design is unsuitable for this recovery
+model.
 
-Phase 5a.1 closes the former delivery-path logging blocker. New share URLs
-have the form:
+Recipient share URLs retain the Phase 5a.1 design:
 
 ```text
 https://example.com/d/{public_id}#{delivery_secret}
 ```
 
-Only the non-secret `public_id` is in the HTTP request path. URL fragments
-are handled by the browser and are never sent in HTTP requests, so edge and
-application request-path logs cannot receive the raw delivery secret through
-normal navigation. The browser removes the fragment before exchanging the
-secret in a bounded same-origin POST body for a short-lived HttpOnly cookie.
-LotKit does not log exchange bodies or cookie values. This design does not
-claim protection from a platform that independently records request bodies;
-verify platform logging settings before deployment.
+The fragment secret is not sent in an HTTP request path. The browser exchanges
+it in a bounded same-origin POST body for a short-lived
+`lotkit_delivery_session` HttpOnly cookie, then removes the fragment. Verify
+that the deployment platform does not independently record request bodies or
+cookies.
 
 ## Production configuration
 
 Set these environment variables:
 
-| Variable | Required | Secret? | Production value |
-| --- | --- | --- | --- |
-| `LOTKIT_ENV` | Yes | No | `production` |
-| `LOTKIT_DATA_DIR` | Yes | No | `/var/data` on Render |
-| `LOTKIT_PUBLIC_BASE_URL` | Yes | No | The canonical public HTTPS origin, with no path or trailing slash |
-| `LOTKIT_TRUSTED_HOSTS` | Yes | No | Comma-separated hostnames accepted by the service; include the Render/custom hostname, without schemes or paths |
-| `PORT` | Supplied by Render | No | The platform-assigned HTTP port |
-| `LOTKIT_DOCS_ENABLED` | Optional | No | Leave unset to keep production API docs disabled; enable only for a deliberate, controlled diagnostic |
+| Variable | Required | Production value |
+| --- | --- | --- |
+| `LOTKIT_ENV` | Yes | `production` |
+| `LOTKIT_DATA_DIR` | Yes | An absolute persistent path, `/var/data` on Render |
+| `LOTKIT_PUBLIC_BASE_URL` | Yes | Canonical public HTTPS origin, with no path or trailing slash |
+| `LOTKIT_TRUSTED_HOSTS` | Yes | Comma-separated accepted hostnames, without schemes or paths |
+| `PORT` | Supplied by Render | Platform-assigned port |
+| `LOTKIT_DOCS_ENABLED` | Optional | Leave unset to disable production docs |
 
-`LOTKIT_PUBLIC_BASE_URL` and `LOTKIT_TRUSTED_HOSTS` use `sync: false` in the
-Blueprint because they are deployment-specific and must be entered in the
-Render Dashboard. They are configuration rather than credentials. No
-session, Stripe, delivery, or other secret value belongs in `render.yaml` or
-an image build argument. Future authentication secrets introduced in Phase
-5b must be Dashboard-managed secrets and must never be logged.
+`LOTKIT_PUBLIC_BASE_URL` builds delivery URLs and is the exact expected
+`Origin` for owner login and unsafe owner requests. It and
+`LOTKIT_TRUSTED_HOSTS` use `sync: false` in the Blueprint because they are
+deployment-specific. Passwords, session values, CSRF values, and delivery
+secrets must never appear in `render.yaml`, image arguments, or logs.
 
-Render terminates HTTPS at its edge and forwards the original request scheme
-to the container. The production Uvicorn command enables proxy-header
-handling for that trusted platform boundary. Canonical public delivery URLs
-are built from `LOTKIT_PUBLIC_BASE_URL`, not an incoming `Host` header.
+Render terminates HTTPS at its edge. The production Uvicorn command trusts
+that proxy boundary, while public URLs come only from
+`LOTKIT_PUBLIC_BASE_URL`, not the incoming `Host` header.
 
-`requirements.txt` remains the developer/CI dependency source and includes
-pytest. `requirements-runtime.txt` mirrors its application dependencies and
-declared versions while excluding only pytest, so the production image does
-not install test tooling. `python-dotenv` remains in the runtime set because
-the application imports it during startup; the image still contains no
-`.env` file.
+The runtime image installs `requirements-runtime.txt`; its application
+versions stay aligned with `requirements.txt` while pytest remains
+development-only.
 
-## Persistent disk and initial startup
+## Persistent disk and first account
 
-Attach exactly one persistent disk at `/var/data`. The application keeps all
-durable state under that mount:
+Attach exactly one persistent disk at `/var/data`. Durable state remains:
 
 ```text
 /var/data/
 ├── lotkit.db
 ├── runs/
 │   └── <run-id>/
-│       ├── processed photos and photo ZIPs
-│       ├── generated sticker and draft Buyers Guide PDFs
+│       ├── generated artifacts
 │       └── immutable delivery-manifest copies
 └── storage/
     └── logos/
-        └── saved dealership logos
 ```
 
-On an empty disk, application startup creates the required directories,
-initialises the SQLite schema, and seeds the temporary implicit owner used by
-the current Phase 4 workflow. It does not create a real authenticated
-account. Phase 5b will introduce the first-account flow and replace only the
-current-owner dependency; it will not require changing profile ownership or
-CRUD schema.
+Startup creates directories and migrates the SQLite schema, but never creates
+or falls back to an account.
 
-The Blueprint intentionally omits `plan`. Before any future deployment,
-select and verify a paid web-service instance in the Render Dashboard.
-Persistent disks are unavailable to free web services. Keep `numInstances`
-at `1`: this SQLite-and-disk beta cannot scale horizontally.
-
-The configured endpoints are:
-
-- `GET /health` — lightweight process liveness, also used by the container
-  and Render Blueprint health checks.
-- `GET /ready` — storage and database readiness; use this for an operator
-  check after startup.
-
-## Local container verification
-
-Build the production image:
+For a new empty database, create an invite-only account from a controlled
+shell:
 
 ```bash
-docker build --tag lotkit:phase5a1 .
+python -m api.manage_users create
 ```
 
-Create an isolated data directory and start the container:
+For an existing Phase 5a database, claim `owner@local` in place:
+
+```bash
+python -m api.manage_users claim-default
+```
+
+The command prompts for the real email, display name, password, and password
+confirmation. It retains the original primary-key ID, preserving ownership of
+all dealerships, Runs, and delivery links. Until claimed, `owner@local` has
+no password and cannot authenticate.
+
+Administrative commands are:
+
+```bash
+python -m api.manage_users list
+python -m api.manage_users set-password
+python -m api.manage_users disable
+python -m api.manage_users enable
+```
+
+Account arguments can be supplied with `--email`, and create/claim also accept
+`--display-name`. Passwords never have a command-line option; hidden
+interactive prompts request them twice.
+
+`set-password` is the controlled-beta password-recovery procedure. Password
+changes and disabling revoke all sessions for that user. Enabling does not
+invent or change a password.
+
+The SQLite-and-disk beta must run as one application instance. Persistent
+disks are unavailable to free Render web services, so select an appropriate
+paid instance before any deployment.
+
+## Photographer session and CSRF architecture
+
+Photographer sessions have a fixed 12-hour absolute lifetime. Authenticated
+activity updates `last_seen_utc` without extending `expires_utc`. Multiple
+sessions can exist deliberately; logout revokes only the current session.
+
+| Cookie | HttpOnly | Secure | SameSite | Path | Max-Age |
+| --- | --- | --- | --- | --- | --- |
+| `lotkit_owner_session` | Yes | Production only | Strict | `/api` | 43200 |
+| `lotkit_owner_csrf` | No | Production only | Strict | `/` | 43200 |
+
+Both credentials use cryptographic randomness. SQLite stores only SHA-256
+hashes. Every authenticated `POST`, `PUT`, `PATCH`, and `DELETE` requires the
+CSRF cookie value in `X-CSRF-Token` and an `Origin` exactly equal to
+`LOTKIT_PUBLIC_BASE_URL`. Login has no session-bound token yet, so it still
+requires the exact Origin. Authentication responses use `Cache-Control:
+no-store`.
+
+Owner authentication is never applied to `/d/*`; recipient routes continue
+using the separate fragment-secret and delivery-session architecture.
+
+## Local production-container verification
+
+Build:
+
+```bash
+docker build --tag lotkit:phase5b .
+```
+
+Start with isolated storage:
 
 ```bash
 LOTKIT_DOCKER_DATA="$(mktemp -d)"
 chmod 770 "$LOTKIT_DOCKER_DATA"
 
 docker run --detach \
-  --name lotkit-phase5a1 \
+  --name lotkit-phase5b \
   --group-add "$(id -g)" \
   --publish 8000:8000 \
   --env LOTKIT_ENV=production \
@@ -118,94 +154,52 @@ docker run --detach \
   --env LOTKIT_TRUSTED_HOSTS=lotkit.invalid,localhost,127.0.0.1 \
   --env PORT=8000 \
   --mount "type=bind,src=$LOTKIT_DOCKER_DATA,dst=/var/data" \
-  lotkit:phase5a1
+  lotkit:phase5b
 ```
 
-The supplemental host group grants the non-root container user access to the
-temporary `0770` bind mount without making it world-writable.
-
-Verify the application and container identity:
+Verify:
 
 ```bash
 curl --fail http://localhost:8000/health
 curl --fail http://localhost:8000/ready
 curl --fail http://localhost:8000/
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  http://localhost:8000/api/runs)" = 401
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   http://localhost:8000/docs)" = 404
-docker exec lotkit-phase5a1 id
-find "$LOTKIT_DOCKER_DATA" -maxdepth 4 -print
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  http://localhost:8000/openapi.json)" = 404
+docker exec lotkit-phase5b id
+docker logs lotkit-phase5b
 ```
 
-The docs request should return `404`, and `id` should report UID/GID `10001`
-rather than root.
+`id` must report UID/GID `10001`. The root page must contain the login-capable
+UI. Logs must contain no password, raw photographer session value, raw CSRF
+value, or delivery credential. Public recipient routes should still return
+their generic bootstrap/unavailable behavior without an owner session.
 
-To verify persistence, create a disposable dealership through the normal API,
-restart with the same mount, and list it:
+Stop and remove the disposable container:
 
 ```bash
-curl --fail --request POST http://localhost:8000/api/dealerships \
-  --form nickname=restart-check
-
-docker stop lotkit-phase5a1
-docker rm lotkit-phase5a1
-
-docker run --detach \
-  --name lotkit-phase5a1 \
-  --group-add "$(id -g)" \
-  --publish 8000:8000 \
-  --env LOTKIT_ENV=production \
-  --env LOTKIT_DATA_DIR=/var/data \
-  --env LOTKIT_PUBLIC_BASE_URL=https://lotkit.invalid \
-  --env LOTKIT_TRUSTED_HOSTS=lotkit.invalid,localhost,127.0.0.1 \
-  --env PORT=8000 \
-  --mount "type=bind,src=$LOTKIT_DOCKER_DATA,dst=/var/data" \
-  lotkit:phase5a1
-
-curl --fail http://localhost:8000/api/dealerships
+docker stop lotkit-phase5b
+docker rm lotkit-phase5b
 ```
 
-Use a disposable Run through the normal UI/API for the equivalent artifact
-restart check. Confirm its folder remains under
-`$LOTKIT_DOCKER_DATA/runs/` after the restart. Never mount the repository
-root or the development database into this production check.
+Use an authenticated browser and disposable records for persistence checks.
+Never mount the repository root or development database into this test.
 
-Stop and remove the test container when finished:
+## Backups, scaling, and deferred storage work
 
-```bash
-docker stop lotkit-phase5a1
-docker rm lotkit-phase5a1
-```
+Before wider use, document and rehearse a database-consistent SQLite backup;
+a filesystem snapshot alone is not that procedure. After beta, move
+relational state to managed Postgres and files to object storage before
+running multiple stateless instances.
 
-The temporary data directory can then be removed after its contents have
-been inspected.
+Phase 5b deliberately does not change loose-photo duplication, old re-package
+ZIPs, delivery snapshot cleanup, orphan cleanup, retention, resizing, or
+recompression. Those remain Phase 5c.0 work.
 
-## Logs and backups
-
-Inspect application logs with:
-
-```bash
-docker logs lotkit-phase5a1
-```
-
-Delivery request paths contain only a non-secret `public_id`, for example
-`GET /d/{public_id}` or `POST /d/{public_id}/exchange`. Fragments are never
-sent in HTTP. LotKit never logs the exchange body or delivery-session cookie,
-and its application log filter defensively redacts fragment secrets if a
-full share URL is accidentally logged. Always inspect output before sharing
-it, and do not enable request-body or cookie logging.
-
-Render disk snapshots are useful for operational recovery. Before any wider
-launch, add and rehearse a database-consistent SQLite backup/export
-procedure; a filesystem snapshot alone is not the documented database
-backup process.
-
-This beta is intentionally limited to one application instance. A
-disk-backed redeploy has brief downtime, and the persistent disk is not a
-horizontal-scaling architecture. After beta, migrate relational state to
-managed Postgres and files to object storage so multiple stateless
-application instances can be used.
-
-Render references used for this configuration:
+Render references:
 
 - [Blueprint YAML reference](https://render.com/docs/blueprint-spec)
 - [Persistent disk behavior and limitations](https://render.com/docs/disks)

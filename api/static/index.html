@@ -30,6 +30,43 @@
         box-shadow: 0 8px 24px rgb(15 23 42 / 8%);
       }
 
+      .login-shell {
+        width: min(440px, 100%);
+        margin-top: max(2rem, 10vh);
+      }
+
+      .login-brand {
+        margin-bottom: 1.5rem;
+      }
+
+      .login-brand p {
+        margin-bottom: 0;
+        color: #52606d;
+      }
+
+      .login-form {
+        display: grid;
+        gap: 1rem;
+      }
+
+      .login-form button {
+        margin-top: 0.25rem;
+      }
+
+      .owner-actions {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 0.65rem;
+        flex-wrap: wrap;
+      }
+
+      .photographer-name {
+        color: #52606d;
+        font-size: 0.9rem;
+        font-weight: 700;
+      }
+
       h1,
       h2 {
         margin-top: 0;
@@ -654,19 +691,72 @@
     </style>
   </head>
   <body>
-    <main>
+    <main
+      id="login-view"
+      class="login-shell"
+      aria-labelledby="login-heading"
+    >
+      <div class="login-brand">
+        <h1 id="login-heading">LotKit</h1>
+        <p>Sign in to prepare and deliver dealership vehicle files.</p>
+      </div>
+      <form id="login-form" class="login-form" novalidate>
+        <div class="field">
+          <label for="login-email">Email</label>
+          <input
+            id="login-email"
+            name="email"
+            type="email"
+            autocomplete="username"
+            required
+          >
+        </div>
+        <div class="field">
+          <label for="login-password">Password</label>
+          <input
+            id="login-password"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            required
+          >
+        </div>
+        <button id="login-button" type="submit">Sign in</button>
+        <p
+          id="login-error"
+          class="error"
+          role="alert"
+          aria-live="polite"
+        ></p>
+      </form>
+    </main>
+
+    <main id="owner-app" hidden>
       <div class="page-heading">
         <div>
           <h1>LotKit</h1>
           <p>Decode a VIN, then review and edit the vehicle details.</p>
         </div>
-        <button
-          id="new-car-button"
-          class="secondary-button"
-          type="button"
-        >
-          New car
-        </button>
+        <div class="owner-actions">
+          <span
+            id="photographer-name"
+            class="photographer-name"
+          ></span>
+          <button
+            id="new-car-button"
+            class="secondary-button"
+            type="button"
+          >
+            New car
+          </button>
+          <button
+            id="logout-button"
+            class="secondary-button"
+            type="button"
+          >
+            Log out
+          </button>
+        </div>
       </div>
 
       <section id="dealerships-section" class="dealerships-section">
@@ -1295,6 +1385,15 @@
     </main>
 
     <script>
+      const loginView = document.querySelector("#login-view");
+      const loginForm = document.querySelector("#login-form");
+      const loginEmail = document.querySelector("#login-email");
+      const loginPassword = document.querySelector("#login-password");
+      const loginButton = document.querySelector("#login-button");
+      const loginError = document.querySelector("#login-error");
+      const ownerApp = document.querySelector("#owner-app");
+      const photographerName = document.querySelector("#photographer-name");
+      const logoutButton = document.querySelector("#logout-button");
       const vinForm = document.querySelector("#vin-form");
       const vehicleForm = document.querySelector("#vehicle-form");
       const vinInput = document.querySelector("#vin");
@@ -1484,6 +1583,115 @@
       let displayedDeliveryStatus = null;
       let ephemeralDeliveryUrl = null;
       let deliveryStatusRequest = 0;
+      let ownerInitialised = false;
+
+      function cookieValue(name) {
+        const prefix = `${encodeURIComponent(name)}=`;
+        for (const part of document.cookie.split(";")) {
+          const cookie = part.trim();
+          if (cookie.startsWith(prefix)) {
+            return decodeURIComponent(cookie.slice(prefix.length));
+          }
+        }
+        return "";
+      }
+
+      async function apiFetch(input, init = {}) {
+        const url = new URL(input, window.location.href);
+        const method = String(init.method || "GET").toUpperCase();
+        const isInternalApi =
+          url.origin === window.location.origin
+          && url.pathname.startsWith("/api/");
+        const isLogin = url.pathname === "/api/auth/login";
+        const headers = new Headers(init.headers || {});
+        if (
+          isInternalApi
+          && !isLogin
+          && ["POST", "PUT", "PATCH", "DELETE"].includes(method)
+        ) {
+          const csrfToken = cookieValue("lotkit_owner_csrf");
+          if (csrfToken) {
+            headers.set("X-CSRF-Token", csrfToken);
+          }
+        }
+
+        const response = await fetch(input, {
+          ...init,
+          headers,
+          credentials: "same-origin",
+        });
+        if (response.status === 401 && isInternalApi && !isLogin) {
+          showLogin(
+            url.pathname === "/api/auth/me"
+              ? ""
+              : "Your session ended. Sign in again.",
+          );
+        }
+        return response;
+      }
+
+      function clearOwnerInterface() {
+        ownerInitialised = false;
+        clearActiveRun();
+        clearEphemeralDeliveryUrl();
+        closeDisplayedRunDetail();
+        dealershipSummaries = [];
+        selectedDealership = null;
+        editingDealershipId = null;
+        dealershipList.replaceChildren();
+        runHistory = [];
+        renderRunHistory();
+        vehicleForm.hidden = true;
+        photosSection.hidden = true;
+        buyersGuideSection.hidden = true;
+        setPhotoFiles([]);
+        loginPassword.value = "";
+      }
+
+      function showLogin(message = "") {
+        clearOwnerInterface();
+        photographerName.textContent = "";
+        ownerApp.hidden = true;
+        loginView.hidden = false;
+        loginError.textContent = message;
+        loginEmail.focus();
+      }
+
+      function showOwnerInterface(user) {
+        const displayName = String(
+          user?.display_name || user?.email || "Photographer",
+        );
+        photographerName.textContent = displayName;
+        loginError.textContent = "";
+        loginView.hidden = true;
+        ownerApp.hidden = false;
+      }
+
+      async function loadOwnerInterface() {
+        if (ownerInitialised) {
+          return;
+        }
+        ownerInitialised = true;
+        updateCsvLink();
+        await Promise.all([loadDealerships(), loadRunHistory()]);
+      }
+
+      async function initialiseAuthentication() {
+        try {
+          const response = await apiFetch("/api/auth/me");
+          if (!response.ok) {
+            if (response.status !== 401) {
+              showLogin("LotKit could not verify your session.");
+            }
+            return;
+          }
+          const user = await response.json();
+          showOwnerInterface(user);
+          await loadOwnerInterface();
+        } catch {
+          showLogin("LotKit could not connect. Please try again.");
+        }
+      }
 
       function setError(message) {
         errorMessage.textContent = message;
@@ -1832,7 +2040,9 @@
 
         try {
           const query = historyQuery().toString();
-          const response = await fetch(`/api/runs${query ? `?${query}` : ""}`);
+          const response = await apiFetch(
+            `/api/runs${query ? `?${query}` : ""}`,
+          );
           const payload = await readResponsePayload(response);
           if (!response.ok || !Array.isArray(payload)) {
             throw new Error(
@@ -2007,7 +2217,7 @@
         renderDeliveryLoading(run);
 
         try {
-          const response = await fetch(
+          const response = await apiFetch(
             `/api/runs/${encodeURIComponent(runId)}/delivery`,
           );
           const payload = await readResponsePayload(response);
@@ -2096,7 +2306,7 @@
 
       async function loadRunDetail(runId, {show = true} = {}) {
         try {
-          const response = await fetch(
+          const response = await apiFetch(
             `/api/runs/${encodeURIComponent(runId)}`,
           );
           const payload = await readResponsePayload(response);
@@ -2234,7 +2444,7 @@
         dealershipError.textContent = "";
 
         try {
-          const response = await fetch(`/api/dealerships/${profileId}`);
+          const response = await apiFetch(`/api/dealerships/${profileId}`);
           const payload = await response.json();
           if (!response.ok) {
             throw new Error(
@@ -2287,7 +2497,7 @@
         dealershipError.textContent = "";
 
         try {
-          const response = await fetch("/api/dealerships");
+          const response = await apiFetch("/api/dealerships");
           const payload = await response.json();
           if (!response.ok || !Array.isArray(payload)) {
             throw new Error(
@@ -2342,7 +2552,7 @@
         dealershipError.textContent = "";
 
         try {
-          const response = await fetch(`/api/dealerships/${profileId}`);
+          const response = await apiFetch(`/api/dealerships/${profileId}`);
           const payload = await response.json();
           if (!response.ok) {
             throw new Error(
@@ -2386,7 +2596,7 @@
         dealershipError.textContent = "";
         button.disabled = true;
         try {
-          const response = await fetch(`/api/dealerships/${profileId}`, {
+          const response = await apiFetch(`/api/dealerships/${profileId}`, {
             method: "DELETE",
           });
           const payload = await response.json();
@@ -2551,7 +2761,7 @@
         errorTarget.textContent = "";
         button.disabled = true;
         try {
-          const response = await fetch(
+          const response = await apiFetch(
             `/api/runs/${encodeURIComponent(runId)}/ready`,
             {method: "POST"},
           );
@@ -2598,7 +2808,7 @@
         deliveryError.textContent = "";
         createDeliveryLinkButton.disabled = true;
         try {
-          const response = await fetch(
+          const response = await apiFetch(
             `/api/runs/${encodeURIComponent(runId)}/delivery`,
             {method: "POST"},
           );
@@ -2665,7 +2875,7 @@
         deliveryError.textContent = "";
         revokeDeliveryLinkButton.disabled = true;
         try {
-          const response = await fetch(
+          const response = await apiFetch(
             `/api/runs/${encodeURIComponent(runId)}/delivery/revoke`,
             {method: "POST"},
           );
@@ -2698,7 +2908,7 @@
         errorTarget.textContent = "";
         button.disabled = true;
         try {
-          const response = await fetch(
+          const response = await apiFetch(
             `/api/runs/${encodeURIComponent(runId)}/reopen`,
             {method: "POST"},
           );
@@ -2775,7 +2985,7 @@
         currentRunError.textContent = "";
         discardRunButton.disabled = true;
         try {
-          const response = await fetch(
+          const response = await apiFetch(
             `/api/runs/${encodeURIComponent(discardedRunId)}/discard`,
             {method: "POST"},
           );
@@ -2960,7 +3170,7 @@
         saveDealershipButton.textContent = "Saving…";
 
         try {
-          const response = await fetch(endpoint, {
+          const response = await apiFetch(endpoint, {
             method,
             body: requestData,
           });
@@ -3047,7 +3257,7 @@
         stickerButton.textContent = "Generating…";
 
         try {
-          const response = await fetch("/api/sticker", {
+          const response = await apiFetch("/api/sticker", {
             method: "POST",
             body: requestData,
           });
@@ -3134,7 +3344,7 @@
             requestBody.dealership_id = outputDealershipId;
           }
 
-          const response = await fetch("/api/buyers-guide", {
+          const response = await apiFetch("/api/buyers-guide", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify(requestBody),
@@ -3287,7 +3497,7 @@
         packageButton.textContent = "Packaging…";
 
         try {
-          const response = await fetch("/api/photos/package", {
+          const response = await apiFetch("/api/photos/package", {
             method: "POST",
             body: requestData,
           });
@@ -3336,7 +3546,7 @@
         decodeButton.textContent = "Decoding…";
 
         try {
-          const response = await fetch("/api/decode", {
+          const response = await apiFetch("/api/decode", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({vin: vinInput.value}),
@@ -3361,9 +3571,48 @@
         }
       });
 
-      updateCsvLink();
-      loadDealerships();
-      loadRunHistory();
+      loginForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        loginError.textContent = "";
+        loginButton.disabled = true;
+        loginButton.textContent = "Signing in…";
+        try {
+          const response = await apiFetch("/api/auth/login", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              email: loginEmail.value,
+              password: loginPassword.value,
+            }),
+          });
+          if (!response.ok) {
+            throw new Error("Email or password is incorrect.");
+          }
+          const user = await response.json();
+          loginPassword.value = "";
+          showOwnerInterface(user);
+          await loadOwnerInterface();
+        } catch (error) {
+          loginError.textContent = error instanceof Error
+            ? error.message
+            : "Email or password is incorrect.";
+        } finally {
+          loginButton.disabled = false;
+          loginButton.textContent = "Sign in";
+        }
+      });
+
+      logoutButton.addEventListener("click", async () => {
+        logoutButton.disabled = true;
+        try {
+          await apiFetch("/api/auth/logout", {method: "POST"});
+        } finally {
+          logoutButton.disabled = false;
+          showLogin();
+        }
+      });
+
+      initialiseAuthentication();
     </script>
   </body>
 </html>

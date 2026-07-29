@@ -28,7 +28,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.requests import ClientDisconnect
 
-from api.auth import current_owner_id, get_or_create_default_owner
+from api.auth import current_owner_id
+from api.auth_routes import AuthNoStoreMiddleware, router as auth_router
 from api.buyers_guide import render_buyers_guide
 from api.config import (
     ConfigurationError,
@@ -109,6 +110,7 @@ REQUIRED_TABLES = frozenset(
         "runs",
         "delivery_links",
         "delivery_sessions",
+        "user_sessions",
     }
 )
 router = APIRouter()
@@ -734,7 +736,10 @@ def get_dealership_logo(
 
 
 @router.post("/api/decode")
-async def decode_vin_endpoint(request: VinRequest):
+async def decode_vin_endpoint(
+    request: VinRequest,
+    owner_id: int = Depends(current_owner_id),
+):
     vin = normalize_vin(request.vin)
     if not is_valid_vin(vin):
         return JSONResponse(
@@ -1721,11 +1726,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             install_delivery_secret_log_redaction()
             ensure_persistent_directories(runtime_settings)
             init_db(runtime_settings.database_path)
-            connection = connect_db(runtime_settings.database_path)
-            try:
-                get_or_create_default_owner(connection)
-            finally:
-                connection.close()
 
             app_instance.state.startup_completed = True
             yield
@@ -1751,6 +1751,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         TrustedHostMiddleware,
         allowed_hosts=list(configured_at_build.trusted_hosts),
     )
+    application.add_middleware(AuthNoStoreMiddleware)
+    application.include_router(auth_router)
     application.include_router(router)
     application.mount(
         "/",

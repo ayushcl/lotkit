@@ -5,6 +5,10 @@ from pathlib import Path
 from api.config import get_settings
 
 
+class DatabaseMigrationError(RuntimeError):
+    """Raised when existing data makes an additive migration unsafe."""
+
+
 def connect_db(db_path: str | Path | None = None) -> sqlite3.Connection:
     settings = get_settings()
     if db_path is None:
@@ -33,6 +37,112 @@ def connect_db(db_path: str | Path | None = None) -> sqlite3.Connection:
     return connection
 
 
+def _validate_existing_user_emails(
+    connection: sqlite3.Connection,
+) -> None:
+    invalid = connection.execute(
+        """
+        SELECT id
+        FROM users
+        WHERE email IS NULL
+           OR length(trim(email)) = 0
+           OR email != trim(email)
+        LIMIT 1
+        """
+    ).fetchone()
+    if invalid is not None:
+        raise DatabaseMigrationError(
+            "Cannot migrate users: every existing email must be non-blank "
+            "and must not contain surrounding whitespace."
+        )
+
+    duplicate = connection.execute(
+        """
+        SELECT email
+        FROM users
+        GROUP BY trim(email) COLLATE NOCASE
+        HAVING COUNT(*) > 1
+        LIMIT 1
+        """
+    ).fetchone()
+    if duplicate is not None:
+        raise DatabaseMigrationError(
+            "Cannot migrate users: case-insensitive duplicate emails exist."
+        )
+
+
+def _migrate_user_authentication(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add Phase 5b identity constraints without rebuilding ``users``."""
+
+    _validate_existing_user_emails(connection)
+    user_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(users)")
+    }
+    additions = {
+        "password_hash": "TEXT",
+        "is_active": (
+            "INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))"
+        ),
+        "updated_utc": "TEXT",
+        "password_changed_utc": "TEXT",
+    }
+    for name, declaration in additions.items():
+        if name not in user_columns:
+            connection.execute(
+                f"ALTER TABLE users ADD COLUMN {name} {declaration}"
+            )
+
+    try:
+        connection.executescript(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS users_email_nocase_idx
+            ON users(email COLLATE NOCASE);
+
+            CREATE TRIGGER IF NOT EXISTS users_require_email_insert
+            BEFORE INSERT ON users
+            WHEN NEW.email IS NULL OR length(trim(NEW.email)) = 0
+            BEGIN
+                SELECT RAISE(ABORT, 'users.email is required');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS users_require_email_update
+            BEFORE UPDATE OF email ON users
+            WHEN NEW.email IS NULL OR length(trim(NEW.email)) = 0
+            BEGIN
+                SELECT RAISE(ABORT, 'users.email is required');
+            END;
+
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL
+                    REFERENCES users(id) ON DELETE CASCADE,
+                session_hash TEXT NOT NULL,
+                csrf_hash TEXT NOT NULL,
+                created_utc TEXT NOT NULL,
+                expires_utc TEXT NOT NULL,
+                last_seen_utc TEXT NOT NULL,
+                revoked_utc TEXT
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                user_sessions_session_hash_idx
+            ON user_sessions(session_hash);
+
+            CREATE INDEX IF NOT EXISTS user_sessions_user_id_idx
+            ON user_sessions(user_id);
+
+            CREATE INDEX IF NOT EXISTS user_sessions_expires_utc_idx
+            ON user_sessions(expires_utc);
+            """
+        )
+    except sqlite3.IntegrityError as exc:
+        raise DatabaseMigrationError(
+            "Cannot migrate users: email identity constraints are unsafe."
+        ) from exc
+
+
 def init_db(db_path: str | Path | None = None) -> None:
     connection = connect_db(db_path)
     try:
@@ -40,9 +150,14 @@ def init_db(db_path: str | Path | None = None) -> None:
             """
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY,
-                email TEXT UNIQUE,
+                email TEXT NOT NULL COLLATE NOCASE,
                 display_name TEXT,
-                created_utc TEXT
+                password_hash TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1
+                    CHECK (is_active IN (0, 1)),
+                created_utc TEXT,
+                updated_utc TEXT,
+                password_changed_utc TEXT
             );
 
             CREATE TABLE IF NOT EXISTS dealership_profiles (
@@ -118,6 +233,8 @@ def init_db(db_path: str | Path | None = None) -> None:
             WHERE revoked_utc IS NULL;
             """
         )
+
+        _migrate_user_authentication(connection)
 
         # Phase 5a.1 uses an additive migration so existing delivery history
         # remains intact. Legacy rows intentionally retain a NULL public_id:

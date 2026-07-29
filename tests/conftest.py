@@ -5,7 +5,7 @@ import pytest
 import api.config
 import api.db
 import api.main
-from api.auth import current_owner_id
+from api.auth import current_owner_id, get_or_create_default_owner
 
 
 @pytest.fixture(autouse=True)
@@ -27,10 +27,17 @@ def isolated_persistence(tmp_path_factory, monkeypatch):
     # Existing endpoint tests reference this compatibility alias directly.
     monkeypatch.setattr(api.main, "RUNS_ROOT", settings.runs_dir)
     api.db.init_db()
+    connection = api.db.connect_db()
+    try:
+        owner_id = get_or_create_default_owner(connection)
+    finally:
+        connection.close()
+    api.main.app.dependency_overrides[current_owner_id] = lambda: owner_id
 
     yield {
         "database_path": settings.database_path,
         "logo_root": settings.dealership_logos_dir,
+        "owner_id": owner_id,
         "runs_root": settings.runs_dir,
         "settings": settings,
     }

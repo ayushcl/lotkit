@@ -43,6 +43,13 @@ class Settings:
 
         return urlsplit(self.public_base_url).netloc
 
+    @property
+    def public_origin(self) -> str:
+        """Return the exact configured origin used for CSRF validation."""
+
+        parsed = urlsplit(self.public_base_url)
+        return f"{parsed.scheme}://{parsed.netloc}"
+
 
 def _parse_boolean(name: str, value: str) -> bool:
     normalized = value.strip().lower()
@@ -98,6 +105,7 @@ def _public_base_url(
         or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
+        or parsed.path.rstrip("/")
         or parsed.query
         or parsed.fragment
     ):
@@ -106,7 +114,7 @@ def _public_base_url(
         raise ConfigurationError(
             "Production requires an HTTPS LOTKIT_PUBLIC_BASE_URL."
         )
-    return value.rstrip("/")
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _trusted_hosts(

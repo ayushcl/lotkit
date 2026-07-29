@@ -191,6 +191,24 @@ def test_public_base_url_has_a_consistent_trailing_slash_policy(
     assert _reload_settings().public_base_url == "https://lotkit.example"
 
 
+def test_public_base_url_is_an_origin_without_a_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOTKIT_ENV", "test")
+    monkeypatch.setenv("LOTKIT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv(
+        "LOTKIT_PUBLIC_BASE_URL",
+        "https://lotkit.example/application",
+    )
+
+    with pytest.raises(
+        api.config.ConfigurationError,
+        match="LOTKIT_PUBLIC_BASE_URL",
+    ):
+        _reload_settings()
+
+
 def test_settings_cache_can_be_reset_without_environment_leaks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

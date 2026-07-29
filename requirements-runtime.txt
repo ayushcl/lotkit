@@ -9,3 +9,4 @@ Pillow==12.3.0
 reportlab==5.0.0
 pypdf==6.10.0
 python-dotenv==1.2.2
+pwdlib[argon2]==0.3.0

@@ -1988,7 +1988,11 @@ def test_delivery_session_cookie_is_secure_in_production(
         production_app,
         base_url="https://lotkit.example",
     ) as production_client:
-        run_id, _ = _make_run_with_artifacts()
+        owner_id = _owner_id()
+        production_app.dependency_overrides[current_owner_id] = (
+            lambda: owner_id
+        )
+        run_id, _ = _make_run_with_artifacts(owner_id=owner_id)
         created = _create_link(production_client, run_id)
         public_id, delivery_secret = _credentials_from_response(created)
         assert created.json()["share_url"].startswith(
