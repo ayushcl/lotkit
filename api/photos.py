@@ -1,8 +1,8 @@
 import json
 from datetime import datetime, timezone
 from io import BytesIO
-from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
 from PIL import Image
 
@@ -12,6 +12,10 @@ SUPPORTED_EXTENSIONS = {
     ".png": ".png",
     ".webp": ".webp",
 }
+
+
+class PhotoPackagingError(RuntimeError):
+    """The completed photo archive failed its integrity contract."""
 
 
 def safe_ext(filename: str) -> str:
@@ -34,6 +38,56 @@ def _is_valid_image(file_bytes: bytes) -> bool:
     except Exception:
         return False
     return True
+
+
+def verify_photo_zip(
+    zip_file: str | Path,
+    expected_filenames: list[str],
+) -> None:
+    """Reopen and fully validate a completed photo ZIP."""
+
+    try:
+        with ZipFile(zip_file, "r") as archive:
+            members = archive.infolist()
+            names = [member.filename for member in members]
+            if archive.testzip() is not None:
+                raise PhotoPackagingError(
+                    "Photo ZIP contains a corrupt member."
+                )
+            if len(names) != len(expected_filenames):
+                raise PhotoPackagingError(
+                    "Photo ZIP member count does not match the package."
+                )
+            if len(set(names)) != len(names):
+                raise PhotoPackagingError(
+                    "Photo ZIP contains duplicate member names."
+                )
+            if names != expected_filenames:
+                raise PhotoPackagingError(
+                    "Photo ZIP members do not match the expected filenames."
+                )
+            for member in members:
+                posix_name = PurePosixPath(member.filename)
+                windows_name = PureWindowsPath(member.filename)
+                if (
+                    member.is_dir()
+                    or member.filename.endswith(("/", "\\"))
+                    or posix_name.is_absolute()
+                    or windows_name.is_absolute()
+                    or windows_name.drive
+                    or ".." in posix_name.parts
+                    or "\\" in member.filename
+                    or len(posix_name.parts) != 1
+                ):
+                    raise PhotoPackagingError(
+                        "Photo ZIP contains an unsafe member path."
+                    )
+    except PhotoPackagingError:
+        raise
+    except (BadZipFile, OSError, RuntimeError) as exc:
+        raise PhotoPackagingError(
+            "Photo ZIP could not be verified."
+        ) from exc
 
 
 def build_run(
@@ -80,6 +134,10 @@ def build_run(
         zip_file.chmod(0o600)
     except OSError:
         pass
+
+    verify_photo_zip(zip_file, filenames)
+    for filename in filenames:
+        (run_directory / filename).unlink()
 
     report = {
         "vin": vin,

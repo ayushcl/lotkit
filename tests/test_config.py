@@ -18,6 +18,7 @@ def _clear_lotkit_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "LOTKIT_PUBLIC_BASE_URL",
         "LOTKIT_TRUSTED_HOSTS",
         "LOTKIT_DOCS_ENABLED",
+        "LOTKIT_ARTIFACT_RETENTION_DAYS",
         "PORT",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -40,7 +41,36 @@ def test_development_defaults_preserve_existing_local_layout(
     assert settings.public_base_url == "http://127.0.0.1:8000"
     assert {"localhost", "127.0.0.1"} <= set(settings.trusted_hosts)
     assert settings.docs_enabled is True
+    assert settings.artifact_retention_days == 30
     assert settings.port == 8000
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "3651", "one month", "1.5"])
+def test_artifact_retention_days_must_be_a_positive_bounded_integer(
+    value: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOTKIT_ENV", "test")
+    monkeypatch.setenv("LOTKIT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("LOTKIT_ARTIFACT_RETENTION_DAYS", value)
+
+    with pytest.raises(
+        api.config.ConfigurationError,
+        match="LOTKIT_ARTIFACT_RETENTION_DAYS",
+    ):
+        _reload_settings()
+
+
+def test_artifact_retention_days_can_be_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOTKIT_ENV", "test")
+    monkeypatch.setenv("LOTKIT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("LOTKIT_ARTIFACT_RETENTION_DAYS", "45")
+
+    assert _reload_settings().artifact_retention_days == 45
 
 
 def test_paths_are_absolute_and_do_not_depend_on_process_cwd(

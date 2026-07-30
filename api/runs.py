@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from api.config import get_settings
+from api.storage import (
+    best_effort_cleanup,
+    enqueue_cleanup_job,
+    revoke_run_delivery_links,
+    run_relative_file,
+)
 
 RUN_STATUSES = frozenset({"in_progress", "ready", "delivered"})
 ARTIFACT_TYPES = frozenset(
@@ -346,6 +352,7 @@ def record_successful_output(
     interior_colour: str | None | object = UNSET,
     photo_order: Sequence[str] | None | object = UNSET,
     dealership_snapshot: Mapping[str, Any] | None | object = UNSET,
+    runs_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """
     Insert or update a Run only after its output file has been written.
@@ -365,6 +372,7 @@ def record_successful_output(
         else normalize_photo_order(photo_order)
     )
 
+    cleanup_job_ids: list[int] = []
     try:
         # This is the single mutation transaction for every output type.
         # It rechecks lifecycle state after generation has succeeded, so a
@@ -398,6 +406,29 @@ def record_successful_output(
             parse_json_object(existing["outputs_json"]) if existing else {}
         )
         outputs = {**old_outputs, **normalized_outputs}
+        if existing is not None:
+            for artifact_type in ARTIFACT_TYPES:
+                if artifact_type not in normalized_outputs:
+                    continue
+                old_filename = old_outputs.get(artifact_type)
+                new_filename = normalized_outputs[artifact_type]
+                if old_filename == new_filename:
+                    continue
+                relative_path = run_relative_file(
+                    target.run_id,
+                    old_filename,
+                    runs_root,
+                )
+                if relative_path is None:
+                    continue
+                queued = enqueue_cleanup_job(
+                    connection,
+                    target.run_id,
+                    relative_path,
+                    f"superseded_{artifact_type}",
+                    runs_root,
+                )
+                cleanup_job_ids.append(queued.job_id)
 
         if vehicle is UNSET:
             vehicle_json = existing["vehicle_json"] if existing else None
@@ -484,15 +515,15 @@ def record_successful_output(
         else:
             # Successful changes invalidate every outstanding bearer link.
             # Historical rows remain available for audit.
-            connection.execute(
-                """
-                UPDATE delivery_links
-                SET revoked_utc = ?,
-                    revocation_reason = 'outputs_changed'
-                WHERE run_id = ? AND revoked_utc IS NULL
-                """,
-                (timestamp, target.run_id),
+            revoked = revoke_run_delivery_links(
+                connection,
+                target.run_id,
+                "outputs_changed",
+                runs_root,
+                datetime.fromisoformat(timestamp),
+                owner_id=owner_id,
             )
+            cleanup_job_ids.extend(revoked.job_ids)
             connection.execute(
                 """
                 UPDATE runs
@@ -503,6 +534,7 @@ def record_successful_output(
                     interior_colour = ?,
                     photo_order_json = ?,
                     outputs_json = ?,
+                    artifacts_purged_utc = NULL,
                     status = CASE
                         WHEN status = 'ready' THEN 'in_progress'
                         ELSE status
@@ -535,6 +567,12 @@ def record_successful_output(
     except Exception:
         connection.rollback()
         raise
+
+    best_effort_cleanup(
+        connection,
+        runs_root,
+        job_ids=cleanup_job_ids,
+    )
 
     detail = get_run_detail(connection, owner_id, target.run_id)
     if detail is None:
@@ -614,6 +652,7 @@ def _run_response(row: sqlite3.Row) -> dict[str, Any]:
         "photo_order": photo_order,
         "outputs": outputs,
         "status": row["status"],
+        "artifacts_purged_utc": row["artifacts_purged_utc"],
         "created_utc": row["created_utc"],
         "updated_utc": row["updated_utc"],
         "photo_count": len(photo_order),
@@ -742,6 +781,7 @@ def list_runs(
                     dealership.get("nickname") or ""
                 ),
                 "status": detail["status"],
+                "artifacts_purged_utc": detail["artifacts_purged_utc"],
                 "outputs": detail["outputs"],
                 "has_photos": detail["has_photos"],
                 "has_sticker": detail["has_sticker"],

@@ -20,6 +20,7 @@ from api.runs import (
     parse_json_object,
     safe_run_directory,
 )
+from api.storage import best_effort_cleanup, revoke_run_delivery_links
 
 DELIVERY_LIFETIME = timedelta(days=30)
 DELIVERY_SESSION_LIFETIME = timedelta(hours=4)
@@ -47,6 +48,7 @@ REVOCATION_REASONS = frozenset(
         "reopened",
         "outputs_changed",
         "transport_migrated",
+        "expired",
     }
 )
 
@@ -723,25 +725,19 @@ def revoke_active_delivery_link(
     now: datetime | None = None,
     *,
     owner_id: int | None = None,
+    runs_root: str | Path | None = None,
 ) -> int:
     if reason not in REVOCATION_REASONS:
         raise ValueError("Unsupported delivery-link revocation reason.")
 
-    clauses = ["run_id = ?", "revoked_utc IS NULL"]
-    parameters: list[Any] = [_utc_text(_as_utc(now)), reason, run_id]
-    if owner_id is not None:
-        clauses.append("owner_id = ?")
-        parameters.append(owner_id)
-
-    cursor = connection.execute(
-        f"""
-        UPDATE delivery_links
-        SET revoked_utc = ?, revocation_reason = ?
-        WHERE {' AND '.join(clauses)}
-        """,
-        parameters,
-    )
-    return int(cursor.rowcount)
+    return revoke_run_delivery_links(
+        connection,
+        run_id,
+        reason,
+        runs_root,
+        now,
+        owner_id=owner_id,
+    ).links_revoked
 
 
 def create_delivery_link(
@@ -754,6 +750,7 @@ def create_delivery_link(
     current = _as_utc(now)
     expires = current + DELIVERY_LIFETIME
     manifest: dict[str, dict[str, str]] = {}
+    cleanup_job_ids: tuple[int, ...] = ()
 
     if connection.in_transaction:
         raise DeliveryError(
@@ -781,13 +778,15 @@ def create_delivery_link(
                 "Run has no durable artifacts to deliver."
             )
 
-        revoke_active_delivery_link(
+        revoked = revoke_run_delivery_links(
             connection,
             run_id,
             "replaced",
+            runs_root,
             current,
             owner_id=owner_id,
         )
+        cleanup_job_ids = revoked.job_ids
 
         token = ""
         public_id = ""
@@ -860,6 +859,12 @@ def create_delivery_link(
             _delete_manifest_files(manifest, run_id, runs_root)
         raise
 
+    best_effort_cleanup(
+        connection,
+        runs_root,
+        job_ids=cleanup_job_ids,
+    )
+
     return CreatedDeliveryLink(
         public_id=public_id,
         delivery_secret=token,
@@ -921,6 +926,7 @@ def revoke_owner_delivery_link(
     owner_id: int,
     run_id: str,
     now: datetime | None = None,
+    runs_root: str | Path | None = None,
 ) -> dict[str, Any]:
     current = _as_utc(now)
     if connection.in_transaction:
@@ -934,17 +940,25 @@ def revoke_owner_delivery_link(
         ).fetchone()
         if run_exists is None:
             raise DeliveryRunNotFoundError("Run not found.")
-        changed = revoke_active_delivery_link(
+        revoked = revoke_run_delivery_links(
             connection,
             run_id,
             "manual",
+            runs_root,
             current,
             owner_id=owner_id,
         )
+        changed = revoked.links_revoked
         connection.commit()
     except Exception:
         connection.rollback()
         raise
+
+    best_effort_cleanup(
+        connection,
+        runs_root,
+        job_ids=revoked.job_ids,
+    )
 
     result = get_owner_delivery_status(
         connection,
@@ -960,6 +974,7 @@ def apply_output_change_lifecycle(
     owner_id: int,
     run_id: str,
     now: datetime | None = None,
+    runs_root: str | Path | None = None,
 ) -> sqlite3.Row:
     """
     Apply the shared mutation rule inside the caller's write transaction.
@@ -985,6 +1000,7 @@ def apply_output_change_lifecycle(
         "outputs_changed",
         now,
         owner_id=owner_id,
+        runs_root=runs_root,
     )
     if revoked and run["status"] == "ready":
         connection.execute(
@@ -1003,6 +1019,7 @@ def reopen_delivered_run(
     owner_id: int,
     run_id: str,
     now: datetime | None = None,
+    runs_root: str | Path | None = None,
 ) -> dict[str, Any]:
     current = _as_utc(now)
     if connection.in_transaction:
@@ -1019,10 +1036,11 @@ def reopen_delivered_run(
         if run["status"] != "delivered":
             raise RunNotDeliveredError("Run is not delivered.")
 
-        revoke_active_delivery_link(
+        revoked = revoke_run_delivery_links(
             connection,
             run_id,
             "reopened",
+            runs_root,
             current,
             owner_id=owner_id,
         )
@@ -1038,6 +1056,12 @@ def reopen_delivered_run(
     except Exception:
         connection.rollback()
         raise
+
+    best_effort_cleanup(
+        connection,
+        runs_root,
+        job_ids=revoked.job_ids,
+    )
 
     detail = get_run_detail(connection, owner_id, run_id)
     if detail is None:

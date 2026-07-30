@@ -7,8 +7,16 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 import api.main
+import api.photos
+from api.db import connect_db
 from api.main import app
-from api.photos import build_run, safe_ext, sequenced_name
+from api.photos import (
+    PhotoPackagingError,
+    build_run,
+    safe_ext,
+    sequenced_name,
+    verify_photo_zip,
+)
 
 VIN = "1HGCM82633A004352"
 
@@ -72,12 +80,15 @@ def test_build_run_creates_images_zip_and_report(tmp_path) -> None:
     assert summary["skipped"] == ["broken.jpg"]
 
     for filename in expected_filenames:
-        assert (run_directory / filename).is_file()
+        assert not (run_directory / filename).exists()
 
     zip_file = tmp_path / summary["zip_path"]
     assert zip_file.is_file()
     with ZipFile(zip_file) as archive:
         assert archive.namelist() == expected_filenames
+        assert archive.read(expected_filenames[0]) == original_files[0][1]
+        assert archive.read(expected_filenames[1]) == original_files[1][1]
+        assert archive.read(expected_filenames[2]) == original_files[2][1]
 
     report_file = tmp_path / summary["report_path"]
     report = json.loads(report_file.read_text(encoding="utf-8"))
@@ -87,6 +98,10 @@ def test_build_run_creates_images_zip_and_report(tmp_path) -> None:
     assert report["filenames"] == expected_filenames
     assert report["skipped"] == ["broken.jpg"]
     assert report["zip_filename"] == f"{VIN}_photos.zip"
+    assert sorted(path.name for path in run_directory.iterdir()) == [
+        f"{VIN}_photos.zip",
+        "run_report.json",
+    ]
 
 
 def test_photo_package_endpoint_and_download(tmp_path, monkeypatch) -> None:
@@ -143,6 +158,61 @@ def test_photo_package_endpoint_rejects_invalid_vin(tmp_path, monkeypatch) -> No
 
     assert response.status_code == 422
     assert response.json() == {"error": "invalid_vin"}
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_zip_verification_rejects_unsafe_or_unexpected_members(
+    tmp_path,
+) -> None:
+    archive_path = tmp_path / "unsafe.zip"
+    with ZipFile(archive_path, "w") as archive:
+        archive.writestr("../outside.jpg", b"photo")
+
+    with pytest.raises(PhotoPackagingError, match="expected filenames"):
+        verify_photo_zip(archive_path, ["safe.jpg"])
+
+
+def test_corrupt_packaging_never_updates_run_or_leaves_permanent_files(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(api.main, "RUNS_ROOT", tmp_path)
+
+    def reject_archive(*_args, **_kwargs):
+        raise PhotoPackagingError("simulated corrupt archive")
+
+    monkeypatch.setattr(api.photos, "verify_photo_zip", reject_archive)
+    connection = connect_db()
+    try:
+        before = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    finally:
+        connection.close()
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/photos/package",
+            data={
+                "vin": VIN,
+                "vehicle": "{}",
+                "order": json.dumps(["photo.jpg"]),
+            },
+            files=[
+                (
+                    "photos",
+                    (
+                        "photo.jpg",
+                        image_bytes("JPEG", "red"),
+                        "image/jpeg",
+                    ),
+                )
+            ],
+        )
+    assert response.status_code == 500
+    connection = connect_db()
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == before
+    finally:
+        connection.close()
     assert list(tmp_path.iterdir()) == []
 
 

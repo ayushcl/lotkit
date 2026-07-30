@@ -35,6 +35,7 @@ Set these environment variables:
 | `LOTKIT_DATA_DIR` | Yes | An absolute persistent path, `/var/data` on Render |
 | `LOTKIT_PUBLIC_BASE_URL` | Yes | Canonical public HTTPS origin, with no path or trailing slash |
 | `LOTKIT_TRUSTED_HOSTS` | Yes | Comma-separated accepted hostnames, without schemes or paths |
+| `LOTKIT_ARTIFACT_RETENTION_DAYS` | Optional | Positive integer from 1 through 3650; defaults to `30` |
 | `PORT` | Supplied by Render | Platform-assigned port |
 | `LOTKIT_DOCS_ENABLED` | Optional | Leave unset to disable production docs |
 
@@ -61,8 +62,9 @@ Attach exactly one persistent disk at `/var/data`. Durable state remains:
 ├── lotkit.db
 ├── runs/
 │   └── <run-id>/
-│       ├── generated artifacts
-│       └── immutable delivery-manifest copies
+│       ├── run_report.json
+│       ├── verified current artifacts
+│       └── immutable active delivery snapshots
 └── storage/
     └── logos/
 ```
@@ -109,6 +111,72 @@ The SQLite-and-disk beta must run as one application instance. Persistent
 disks are unavailable to free Render web services, so select an appropriate
 paid instance before any deployment.
 
+The Blueprint's current `sizeGB: 1` is a non-launch placeholder, not a
+production capacity recommendation. Select production capacity only after
+representative full vehicle shoots have been measured after ZIP verification,
+loose-photo removal, snapshot cleanup, and retention processing.
+
+## Storage lifecycle and explicit maintenance
+
+Photo packaging stages validated renamed photographs, creates the ZIP, then
+reopens the completed archive. LotKit requires a successful CRC check, the
+exact expected member-name sequence and count, no duplicates, and no absolute,
+parent-traversal, or directory members. Only after those checks pass are the
+redundant loose staged photographs removed. Images are not resized,
+recompressed, rotated, or otherwise changed; the bytes extracted from the ZIP
+match the accepted uploads.
+
+SQLite's `storage_cleanup_jobs` table stores exact paths relative to
+`LOTKIT_DATA_DIR/runs`. A partial unique index permits only one pending job per
+path. Jobs reject absolute paths, traversal, empty components, symlinks,
+directories, non-UUID Run directories, and paths outside the Runs root.
+Deletion revalidates current output references and active delivery manifests,
+then uses non-following directory descriptors. Missing files complete
+successfully. Failures retain a bounded error and attempt count for retry.
+
+Cleanup is queued in the same SQLite transaction that:
+
+- replaces a current photo ZIP, sticker, or Buyers Guide reference;
+- revokes a delivery link because it was replaced, manually withdrawn,
+  reopened, changed, transport-migrated, or explicitly expired; or
+- retires eligible delivered Run artifacts.
+
+The filesystem attempt happens only after commit. Delivery rows and immutable
+manifests remain as audit history after their snapshot files are gone.
+Historical Run rows and `run_report.json` also remain after retention.
+
+`LOTKIT_ARTIFACT_RETENTION_DAYS` defaults to 30. A Run is eligible only when it
+is `delivered`, its latest non-null `first_download_started_utc` is at least
+that old, it has no unrevoked/unexpired link, and it still has a current
+artifact reference. Retention removes those references transactionally,
+records `artifacts_purged_utc`, and queues only their exact files. It never
+purges `in_progress` or `ready` Runs.
+
+Photographers are responsible for retaining original camera files.
+Photographs removed by LotKit cannot be recovered from LotKit. Expired PDFs
+and other generated documents are not guaranteed to regenerate identically.
+
+Run maintenance explicitly as the same non-root application user and with the
+same environment:
+
+```bash
+python -m api.cleanup_storage report
+python -m api.cleanup_storage plan
+python -m api.cleanup_storage apply
+```
+
+`report` measures the Run root, referenced artifacts, active and inactive
+snapshots, pending work, loose photos, unmanaged data, legacy data, and the
+largest current Runs. `plan` uses the same selection logic as `apply` but
+makes no filesystem or database changes. Running the module with no
+subcommand only prints help.
+
+There is no in-process scheduler, cron configuration, or background worker in
+this phase. A future deployment should invoke `python -m api.cleanup_storage
+apply` explicitly from a reviewed platform job, after first reviewing
+`report` and `plan`. The command keeps individual unlink failures pending and
+returns a failure status only for a real command or database failure.
+
 ## Photographer session and CSRF architecture
 
 Photographer sessions have a fixed 12-hour absolute lifetime. Authenticated
@@ -135,7 +203,7 @@ using the separate fragment-secret and delivery-session architecture.
 Build:
 
 ```bash
-docker build --tag lotkit:phase5b .
+docker build --tag lotkit:phase5c0 .
 ```
 
 Start with isolated storage:
@@ -145,7 +213,7 @@ LOTKIT_DOCKER_DATA="$(mktemp -d)"
 chmod 770 "$LOTKIT_DOCKER_DATA"
 
 docker run --detach \
-  --name lotkit-phase5b \
+  --name lotkit-phase5c0 \
   --group-add "$(id -g)" \
   --publish 8000:8000 \
   --env LOTKIT_ENV=production \
@@ -154,7 +222,7 @@ docker run --detach \
   --env LOTKIT_TRUSTED_HOSTS=lotkit.invalid,localhost,127.0.0.1 \
   --env PORT=8000 \
   --mount "type=bind,src=$LOTKIT_DOCKER_DATA,dst=/var/data" \
-  lotkit:phase5b
+  lotkit:phase5c0
 ```
 
 Verify:
@@ -169,8 +237,10 @@ test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   http://localhost:8000/docs)" = 404
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   http://localhost:8000/openapi.json)" = 404
-docker exec lotkit-phase5b id
-docker logs lotkit-phase5b
+docker exec lotkit-phase5c0 id
+docker exec lotkit-phase5c0 python -m api.cleanup_storage report
+docker exec lotkit-phase5c0 python -m api.cleanup_storage plan
+docker logs lotkit-phase5c0
 ```
 
 `id` must report UID/GID `10001`. The root page must contain the login-capable
@@ -181,23 +251,24 @@ their generic bootstrap/unavailable behavior without an owner session.
 Stop and remove the disposable container:
 
 ```bash
-docker stop lotkit-phase5b
-docker rm lotkit-phase5b
+docker stop lotkit-phase5c0
+docker rm lotkit-phase5c0
 ```
 
 Use an authenticated browser and disposable records for persistence checks.
 Never mount the repository root or development database into this test.
 
-## Backups, scaling, and deferred storage work
+## Backups and scaling
 
 Before wider use, document and rehearse a database-consistent SQLite backup;
 a filesystem snapshot alone is not that procedure. After beta, move
 relational state to managed Postgres and files to object storage before
 running multiple stateless instances.
 
-Phase 5b deliberately does not change loose-photo duplication, old re-package
-ZIPs, delivery snapshot cleanup, orphan cleanup, retention, resizing, or
-recompression. Those remain Phase 5c.0 work.
+Unknown orphan files are intentionally not inferred from filename patterns or
+deleted. Use the report to investigate them. Pre-UUID timestamp-named
+directories remain legacy data and must be handled only through a separately
+reviewed migration or backup process.
 
 Render references:
 

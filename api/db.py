@@ -3,6 +3,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from api.config import get_settings
+from api.storage import (
+    best_effort_cleanup,
+    enqueue_cleanup_job,
+    safe_manifest_paths,
+)
 
 
 class DatabaseMigrationError(RuntimeError):
@@ -145,6 +150,7 @@ def _migrate_user_authentication(
 
 def init_db(db_path: str | Path | None = None) -> None:
     connection = connect_db(db_path)
+    transport_cleanup_job_ids: list[int] = []
     try:
         connection.executescript(
             """
@@ -194,6 +200,7 @@ def init_db(db_path: str | Path | None = None) -> None:
                 photo_order_json TEXT,
                 outputs_json TEXT,
                 status TEXT NOT NULL DEFAULT 'in_progress',
+                artifacts_purged_utc TEXT,
                 created_utc TEXT,
                 updated_utc TEXT
             );
@@ -236,6 +243,49 @@ def init_db(db_path: str | Path | None = None) -> None:
 
         _migrate_user_authentication(connection)
 
+        run_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(runs)")
+        }
+        if "artifacts_purged_utc" not in run_columns:
+            connection.execute(
+                "ALTER TABLE runs ADD COLUMN artifacts_purged_utc TEXT"
+            )
+
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS storage_cleanup_jobs (
+                id INTEGER PRIMARY KEY,
+                run_id TEXT NOT NULL
+                    REFERENCES runs(run_id) ON DELETE CASCADE,
+                relative_path TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_utc TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0
+                    CHECK (attempt_count >= 0),
+                last_attempt_utc TEXT,
+                last_error TEXT,
+                completed_utc TEXT
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                storage_cleanup_jobs_pending_path_idx
+            ON storage_cleanup_jobs(relative_path)
+            WHERE completed_utc IS NULL;
+
+            CREATE INDEX IF NOT EXISTS
+                storage_cleanup_jobs_pending_idx
+            ON storage_cleanup_jobs(completed_utc, created_utc, id);
+
+            CREATE INDEX IF NOT EXISTS
+                storage_cleanup_jobs_run_id_idx
+            ON storage_cleanup_jobs(run_id);
+
+            CREATE INDEX IF NOT EXISTS
+                storage_cleanup_jobs_created_utc_idx
+            ON storage_cleanup_jobs(created_utc);
+            """
+        )
+
         # Phase 5a.1 uses an additive migration so existing delivery history
         # remains intact. Legacy rows intentionally retain a NULL public_id:
         # their former URL-path bearer secret cannot be reconstructed safely.
@@ -248,14 +298,36 @@ def init_db(db_path: str | Path | None = None) -> None:
                 "ALTER TABLE delivery_links ADD COLUMN public_id TEXT"
             )
 
-        connection.execute(
+        transport_migration_utc = datetime.now(timezone.utc)
+        for link in connection.execute(
             """
-            UPDATE delivery_links
-            SET revoked_utc = ?, revocation_reason = 'transport_migrated'
+            SELECT id, run_id, artifact_manifest_json
+            FROM delivery_links
             WHERE public_id IS NULL AND revoked_utc IS NULL
-            """,
-            (datetime.now(timezone.utc).isoformat(),),
-        )
+            ORDER BY id
+            """
+        ).fetchall():
+            for relative_path in safe_manifest_paths(
+                link["artifact_manifest_json"],
+                link["run_id"],
+            ):
+                queued = enqueue_cleanup_job(
+                    connection,
+                    link["run_id"],
+                    relative_path,
+                    "delivery_transport_migrated",
+                    now=transport_migration_utc,
+                )
+                transport_cleanup_job_ids.append(queued.job_id)
+            connection.execute(
+                """
+                UPDATE delivery_links
+                SET revoked_utc = ?,
+                    revocation_reason = 'transport_migrated'
+                WHERE id = ? AND revoked_utc IS NULL
+                """,
+                (transport_migration_utc.isoformat(), link["id"]),
+            )
 
         connection.executescript(
             """
@@ -293,5 +365,9 @@ def init_db(db_path: str | Path | None = None) -> None:
             """
         )
         connection.commit()
+        best_effort_cleanup(
+            connection,
+            job_ids=transport_cleanup_job_ids,
+        )
     finally:
         connection.close()

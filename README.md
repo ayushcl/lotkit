@@ -50,6 +50,47 @@ Run the tests:
 python3 -m pytest
 ```
 
+## Storage lifecycle
+
+Photo packaging writes validated renamed files into a temporary Run directory,
+creates the ZIP, reopens it, runs the ZIP CRC check, and verifies the exact
+member names, count, uniqueness, and path safety. Only then does LotKit remove
+the redundant loose copies. A successful current UUID Run therefore retains
+the verified ZIP and `run_report.json`; source image bytes inside the ZIP are
+unchanged.
+
+Superseded Run outputs and unusable delivery snapshots enter an exact
+database-backed cleanup queue. Jobs contain only validated paths relative to
+the Runs root, never arbitrary or absolute paths. Cleanup is retryable and a
+filesystem failure does not roll back an already committed output,
+revocation, expiry, or retention decision. Unknown files and pre-UUID legacy
+directories are reported but never automatically deleted.
+
+Delivered Run artifacts default to 30 days of retention, measured from the
+latest recorded delivery download start. A Run is eligible only after that
+cutoff and when it has no active delivery link. Purging removes current
+artifact references and files while preserving the Run, vehicle, dealership,
+photo-order, lifecycle, and report metadata. Set
+`LOTKIT_ARTIFACT_RETENTION_DAYS` to a positive integer from 1 through 3650 to
+change the policy.
+
+Storage work is explicit:
+
+```bash
+python -m api.cleanup_storage report
+python -m api.cleanup_storage plan
+python -m api.cleanup_storage apply
+```
+
+`report` and `plan` are read-only. `apply` expires links, retires eligible
+current artifacts, reconciles already-revoked delivery manifests, and retries
+pending exact-path jobs. There is no automatic scheduler yet; an operator or
+future platform job must invoke `apply`.
+
+Photographers must retain the original camera files. Photographs deleted by
+LotKit are not recoverable from LotKit, and expired generated documents are
+not guaranteed to regenerate identically.
+
 ## Authentication
 
 Owner authentication and public delivery authentication are intentionally

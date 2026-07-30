@@ -1960,7 +1960,9 @@
         container.className = "output-list";
         const types = outputTypes(run);
         if (!types.length) {
-          container.textContent = "—";
+          container.textContent = run?.artifacts_purged_utc
+            ? "Artifacts expired"
+            : "—";
           return container;
         }
         for (const type of types) {
@@ -2285,7 +2287,9 @@
         const types = outputTypes(payload);
         if (!types.length) {
           const empty = document.createElement("span");
-          empty.textContent = "No downloadable outputs.";
+          empty.textContent = payload.artifacts_purged_utc
+            ? "Artifacts expired"
+            : "No downloadable outputs.";
           runArtifactLinks.append(empty);
         } else {
           for (const type of types) {

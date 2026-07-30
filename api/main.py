@@ -111,6 +111,7 @@ REQUIRED_TABLES = frozenset(
         "delivery_links",
         "delivery_sessions",
         "user_sessions",
+        "storage_cleanup_jobs",
     }
 )
 router = APIRouter()
@@ -355,6 +356,7 @@ def _record_output(
             interior_colour=interior_colour,
             photo_order=photo_order,
             dealership_snapshot=dealership_snapshot,
+            runs_root=RUNS_ROOT,
         )
     finally:
         connection.close()
@@ -400,6 +402,32 @@ def _remove_new_run_folder(target: RunTarget) -> None:
         return
     if directory.is_dir():
         shutil.rmtree(directory)
+
+
+def _remove_failed_artifact(
+    target: RunTarget,
+    artifact_path: Path | None,
+) -> None:
+    """Remove only the exactly known artifact from a failed DB mutation."""
+
+    if target.is_new:
+        _remove_new_run_folder(target)
+        return
+    if artifact_path is None:
+        return
+    try:
+        run_directory = safe_run_directory(target.run_id, RUNS_ROOT)
+        candidate = artifact_path
+        file_stat = candidate.lstat()
+    except (FileNotFoundError, InvalidRunDataError, OSError):
+        return
+    if (
+        candidate.parent == run_directory
+        and candidate.is_file()
+        and not candidate.is_symlink()
+        and file_stat.st_nlink >= 1
+    ):
+        candidate.unlink(missing_ok=True)
 
 
 def _artifact_response(
@@ -839,6 +867,9 @@ async def package_photos(
                 break
     ordered_files.extend(remaining)
 
+    new_artifact_path: Path | None = None
+    pending_report_bytes: bytes | None = None
+    run_directory: Path | None = None
     try:
         safe_run_directory(target.run_id, RUNS_ROOT)
         RUNS_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -864,19 +895,20 @@ async def package_photos(
                 if run_directory.exists():
                     raise FileExistsError("Run storage already exists.")
                 staged_directory.replace(run_directory)
+                new_artifact_path = run_directory / zip_filename
             else:
                 run_directory.mkdir(
                     parents=False,
                     exist_ok=True,
                     mode=0o700,
                 )
-                for staged_file in staged_directory.iterdir():
-                    destination_name = (
-                        zip_filename
-                        if staged_file.name == original_zip_filename
-                        else staged_file.name
-                    )
-                    staged_file.replace(run_directory / destination_name)
+                staged_zip = staged_directory / original_zip_filename
+                new_artifact_path = run_directory / zip_filename
+                staged_zip.replace(new_artifact_path)
+                report_name = Path(summary["report_path"]).name
+                pending_report_bytes = (
+                    staged_directory / report_name
+                ).read_bytes()
 
         _record_output(
             owner_id,
@@ -901,16 +933,43 @@ async def package_photos(
                 else UNSET
             ),
         )
+        if (
+            not target.is_new
+            and pending_report_bytes is not None
+            and run_directory is not None
+        ):
+            temporary_report = (
+                run_directory / f".run_report-{uuid.uuid4().hex}.tmp"
+            )
+            try:
+                temporary_report.write_bytes(pending_report_bytes)
+                try:
+                    temporary_report.chmod(0o600)
+                except OSError:
+                    pass
+                temporary_report.replace(
+                    run_directory / "run_report.json"
+                )
+            except OSError as exc:
+                try:
+                    temporary_report.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                LOGGER.warning(
+                    "Run report refresh failed after committed packaging "
+                    "(%s).",
+                    type(exc).__name__,
+                )
     except (
         InvalidRunDataError,
         RunConflictError,
         RunNotFoundError,
         RunStatusConflictError,
     ) as exc:
-        _remove_new_run_folder(target)
+        _remove_failed_artifact(target, new_artifact_path)
         return _run_error_response(exc)
     except Exception:
-        _remove_new_run_folder(target)
+        _remove_failed_artifact(target, new_artifact_path)
         raise
 
     return JSONResponse(
@@ -1099,8 +1158,13 @@ async def create_sticker(
         f"{normalized_vin}_sticker",
         ".pdf",
     )
+    new_artifact_path: Path | None = None
     try:
-        _write_run_file(target, sticker_filename, pdf_bytes)
+        new_artifact_path = _write_run_file(
+            target,
+            sticker_filename,
+            pdf_bytes,
+        )
         _record_output(
             owner_id,
             target,
@@ -1125,10 +1189,10 @@ async def create_sticker(
         RunNotFoundError,
         RunStatusConflictError,
     ) as exc:
-        _remove_new_run_folder(target)
+        _remove_failed_artifact(target, new_artifact_path)
         return _run_error_response(exc)
     except Exception:
-        _remove_new_run_folder(target)
+        _remove_failed_artifact(target, new_artifact_path)
         raise
 
     return JSONResponse(
@@ -1202,8 +1266,13 @@ def create_buyers_guide(
         "make": request.make,
         "model": request.model,
     }
+    new_artifact_path: Path | None = None
     try:
-        _write_run_file(target, buyers_guide_filename, pdf_bytes)
+        new_artifact_path = _write_run_file(
+            target,
+            buyers_guide_filename,
+            pdf_bytes,
+        )
         _record_output(
             owner_id,
             target,
@@ -1235,10 +1304,10 @@ def create_buyers_guide(
         RunNotFoundError,
         RunStatusConflictError,
     ) as exc:
-        _remove_new_run_folder(target)
+        _remove_failed_artifact(target, new_artifact_path)
         return _run_error_response(exc)
     except Exception:
-        _remove_new_run_folder(target)
+        _remove_failed_artifact(target, new_artifact_path)
         raise
 
     return JSONResponse(
@@ -1408,6 +1477,7 @@ def revoke_run_delivery_link(
                 connection,
                 owner_id,
                 run_id,
+                runs_root=RUNS_ROOT,
             )
         except DeliveryRunNotFoundError as exc:
             return _delivery_error_response(exc)
@@ -1427,6 +1497,7 @@ def reopen_saved_run(
                 connection,
                 owner_id,
                 run_id,
+                runs_root=RUNS_ROOT,
             )
         except (
             DeliveryRunNotFoundError,

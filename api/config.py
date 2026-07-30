@@ -18,6 +18,8 @@ DEFAULT_TRUSTED_HOSTS = (
     "[::1]",
     "testserver",
 )
+DEFAULT_ARTIFACT_RETENTION_DAYS = 30
+MAX_ARTIFACT_RETENTION_DAYS = 3650
 
 
 class ConfigurationError(RuntimeError):
@@ -35,6 +37,7 @@ class Settings:
     public_base_url: str
     trusted_hosts: tuple[str, ...]
     docs_enabled: bool
+    artifact_retention_days: int
     port: int
 
     @property
@@ -155,6 +158,23 @@ def _port(raw_value: str | None) -> int:
     return port
 
 
+def _artifact_retention_days(raw_value: str | None) -> int:
+    if raw_value is None or not raw_value.strip():
+        return DEFAULT_ARTIFACT_RETENTION_DAYS
+    try:
+        days = int(raw_value)
+    except ValueError as exc:
+        raise ConfigurationError(
+            "LOTKIT_ARTIFACT_RETENTION_DAYS must be a positive integer."
+        ) from exc
+    if not 1 <= days <= MAX_ARTIFACT_RETENTION_DAYS:
+        raise ConfigurationError(
+            "LOTKIT_ARTIFACT_RETENTION_DAYS must be between 1 and "
+            f"{MAX_ARTIFACT_RETENTION_DAYS}."
+        )
+    return days
+
+
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     """Build validated settings from an environment mapping."""
 
@@ -208,6 +228,9 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         public_base_url=public_base_url,
         trusted_hosts=trusted_hosts,
         docs_enabled=docs_enabled,
+        artifact_retention_days=_artifact_retention_days(
+            values.get("LOTKIT_ARTIFACT_RETENTION_DAYS")
+        ),
         port=_port(values.get("PORT")),
     )
 

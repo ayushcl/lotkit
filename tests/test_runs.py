@@ -263,6 +263,7 @@ def test_init_db_creates_runs_schema_index_and_foreign_keys(
             "photo_order_json",
             "outputs_json",
             "status",
+            "artifacts_purged_utc",
             "created_utc",
             "updated_utc",
         }

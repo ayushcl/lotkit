@@ -515,6 +515,12 @@ def test_replacement_manual_revocation_and_partial_unique_index(
     assert first.status_code == 201
     first_public_id, first_secret = _credentials_from_response(first)
     assert _exchange(client, first_public_id, first_secret).status_code == 204
+    first_manifest = json.loads(
+        _delivery_rows(run_id)[0]["artifact_manifest_json"]
+    )
+    first_snapshots = [
+        _manifest_path(entry) for entry in first_manifest.values()
+    ]
 
     second = _create_link(client, run_id)
     assert second.status_code == 201
@@ -529,6 +535,12 @@ def test_replacement_manual_revocation_and_partial_unique_index(
     assert rows[0]["revocation_reason"] == "replaced"
     assert rows[1]["revoked_utc"] is None
     assert sum(row["revoked_utc"] is None for row in rows) == 1
+    assert all(not path.exists() for path in first_snapshots)
+    second_manifest = json.loads(rows[1]["artifact_manifest_json"])
+    second_snapshots = [
+        _manifest_path(entry) for entry in second_manifest.values()
+    ]
+    assert all(path.is_file() for path in second_snapshots)
     first_unavailable = client.get(f"/d/{first_public_id}")
     assert first_unavailable.status_code == 200
     assert "Opening secure delivery" in first_unavailable.text
@@ -582,6 +594,8 @@ def test_replacement_manual_revocation_and_partial_unique_index(
     latest = _delivery_rows(run_id)[-1]
     assert latest["revoked_utc"] is not None
     assert latest["revocation_reason"] == "manual"
+    assert latest["artifact_manifest_json"]
+    assert all(not path.exists() for path in second_snapshots)
     revoked_page = client.get(f"/d/{second_public_id}")
     assert revoked_page.status_code == 200
     assert VIN not in revoked_page.text
@@ -1287,7 +1301,7 @@ def test_successful_regeneration_versions_output_revokes_link_and_snapshot(
         _delivery_rows(run_id)[0]["artifact_manifest_json"]
     )
     immutable_old = _manifest_path(original_manifest[artifact_type])
-    old_bytes = immutable_old.read_bytes()
+    assert immutable_old.is_file()
 
     regenerated = _regenerate_artifact(
         client,
@@ -1306,8 +1320,7 @@ def test_successful_regeneration_versions_output_revokes_link_and_snapshot(
     assert _uuid_in_text(latest_filename)
     latest_file = api.main.RUNS_ROOT / run_id / latest_filename
     assert latest_file.is_file()
-    assert immutable_old.is_file()
-    assert immutable_old.read_bytes() == old_bytes
+    assert not immutable_old.exists()
     assert json.loads(row["vehicle_json"])["trim"] == "Changed snapshot"
     assert row["price"] == "8250"
 
@@ -1437,6 +1450,13 @@ def test_delivered_run_is_locked_until_explicit_reopen(
     assert locked["vehicle_json"] == snapshot_before
     assert json.loads(locked["outputs_json"]) == original_outputs
     assert _delivery_rows(run_id)[0]["revoked_utc"] is None
+    delivered_manifest = json.loads(
+        _delivery_rows(run_id)[0]["artifact_manifest_json"]
+    )
+    delivered_snapshots = [
+        _manifest_path(entry) for entry in delivered_manifest.values()
+    ]
+    assert all(path.is_file() for path in delivered_snapshots)
 
     reopened = client.post(f"/api/runs/{run_id}/reopen")
     assert reopened.status_code == 200
@@ -1445,6 +1465,8 @@ def test_delivered_run_is_locked_until_explicit_reopen(
     link = _delivery_rows(run_id)[0]
     assert link["revoked_utc"] is not None
     assert link["revocation_reason"] == "reopened"
+    assert link["artifact_manifest_json"]
+    assert all(not path.exists() for path in delivered_snapshots)
     reopened_page = client.get(f"/d/{public_id}")
     assert reopened_page.status_code == 200
     assert "Opening secure delivery" in reopened_page.text
