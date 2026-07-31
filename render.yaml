@@ -27,4 +27,4 @@ services:
     disk:
       name: lotkit-data
       mountPath: /var/data
-      sizeGB: 20
+      sizeGB: 5
