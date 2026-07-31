@@ -32,18 +32,27 @@ Set these environment variables:
 | --- | --- | --- |
 | `LOTKIT_ENV` | Yes | `production` |
 | `LOTKIT_DATA_DIR` | Yes | An absolute persistent path, `/var/data` on Render |
-| `LOTKIT_PUBLIC_BASE_URL` | Yes | Canonical public HTTPS origin, with no path or trailing slash |
-| `LOTKIT_TRUSTED_HOSTS` | Yes | Comma-separated accepted hostnames, without schemes or paths |
+| `LOTKIT_PUBLIC_BASE_URL` | Conditional | Explicit canonical HTTPS origin override; required in non-Render production |
+| `LOTKIT_TRUSTED_HOSTS` | Conditional | Explicit comma-separated hostname override; required in non-Render production |
 | `LOTKIT_FORWARDED_ALLOW_IPS` | Yes | Reviewed direct proxy IPs/networks Uvicorn may trust; never use a production wildcard |
+| `RENDER` | Supplied by Render | Exact platform indicator value `true` |
+| `RENDER_EXTERNAL_URL` | Supplied by Render | Fallback canonical public URL when the LotKit override is empty |
+| `RENDER_EXTERNAL_HOSTNAME` | Supplied by Render | Fallback trusted hostname when the LotKit override is empty |
 | `LOTKIT_ARTIFACT_RETENTION_DAYS` | Optional | Positive integer from 1 through 3650; defaults to `30` |
 | `PORT` | Supplied by Render | Platform-assigned port |
 | `LOTKIT_DOCS_ENABLED` | Optional | Leave unset to disable production docs |
 
 `LOTKIT_PUBLIC_BASE_URL` builds delivery URLs and is the exact expected
-`Origin` for owner login and unsafe owner requests. It and
-`LOTKIT_TRUSTED_HOSTS` use `sync: false` in the Blueprint because they are
-deployment-specific. Passwords, session values, CSRF values, and delivery
-secrets must never appear in `render.yaml`, image arguments, or logs.
+`Origin` for owner login and unsafe owner requests. Explicit non-empty LotKit
+URL and trusted-host values always win. When `RENDER` is exactly `true` and an
+override is empty, LotKit uses only Render's official `RENDER_EXTERNAL_URL`
+and `RENDER_EXTERNAL_HOSTNAME`. The Blueprint therefore does not prompt for
+the two overrides. Production outside Render continues to require explicit
+valid LotKit values. Missing or malformed production fallback values stop
+startup; incoming `Host` or forwarding headers never fill configuration.
+
+Passwords, session values, CSRF values, and delivery secrets must never appear
+in `render.yaml`, image arguments, or logs.
 
 Render terminates HTTPS at its edge. Configure
 `LOTKIT_FORWARDED_ALLOW_IPS` in the Render Dashboard with only the verified
@@ -57,12 +66,13 @@ Uvicorn access logs remain enabled. Owner-authentication application logs stay
 generic and never include email, passwords, request bodies, cookies, session
 or CSRF credentials, throttle keys, or forwarding-header contents.
 
-Before inviting pilot users, run a post-deployment spoof test from outside the
-trusted proxy boundary: changing a supplied forwarding header must not change
-the observed throttle identity. Also confirm requests through Render resolve
-to the real client identity rather than one shared proxy IP. A wrong boundary
-can either let callers rotate spoofed IPs or make unrelated users share a
-bucket.
+Keep the initial deployment private. Before inviting pilot users, run a live
+spoof test from outside the trusted proxy boundary: changing a supplied
+forwarding header must not change the observed throttle identity. Also confirm
+requests through Render resolve to the real client identity rather than one
+shared proxy IP. A wrong boundary can either let callers rotate spoofed IPs or
+make unrelated users share a bucket. `LOTKIT_FORWARDED_ALLOW_IPS` is a
+separate manual security boundary and must never be `*` in production.
 
 The runtime image installs `requirements-runtime.txt`; its application
 versions stay aligned with `requirements.txt` while pytest remains
@@ -126,7 +136,7 @@ The SQLite-and-disk beta must run as one application instance. Persistent
 disks are unavailable to free Render web services, so select an appropriate
 paid instance before any deployment.
 
-The Blueprint's current `sizeGB: 1` is a non-launch placeholder, not a
+The Blueprint's current `sizeGB: 5` is a pilot placeholder, not a
 production capacity recommendation. Select production capacity only after
 representative full vehicle shoots have been measured after ZIP verification,
 loose-photo removal, snapshot cleanup, and retention processing.
@@ -249,8 +259,9 @@ docker run --detach \
   --publish 8000:8000 \
   --env LOTKIT_ENV=production \
   --env LOTKIT_DATA_DIR=/var/data \
-  --env LOTKIT_PUBLIC_BASE_URL=https://lotkit.invalid \
-  --env LOTKIT_TRUSTED_HOSTS=lotkit.invalid,localhost,127.0.0.1 \
+  --env RENDER=true \
+  --env RENDER_EXTERNAL_URL=https://lotkit.invalid \
+  --env RENDER_EXTERNAL_HOSTNAME=lotkit.invalid \
   --env LOTKIT_FORWARDED_ALLOW_IPS=127.0.0.1 \
   --env PORT=8000 \
   --mount "type=bind,src=$LOTKIT_DOCKER_DATA,dst=/var/data" \
@@ -260,14 +271,17 @@ docker run --detach \
 Verify:
 
 ```bash
-curl --fail http://localhost:8000/health
-curl --fail http://localhost:8000/ready
-curl --fail http://localhost:8000/
+curl --fail --header 'Host: lotkit.invalid' http://localhost:8000/health
+curl --fail --header 'Host: lotkit.invalid' http://localhost:8000/ready
+curl --fail --header 'Host: lotkit.invalid' http://localhost:8000/
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --header 'Host: lotkit.invalid' \
   http://localhost:8000/api/runs)" = 401
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --header 'Host: lotkit.invalid' \
   http://localhost:8000/docs)" = 404
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --header 'Host: lotkit.invalid' \
   http://localhost:8000/openapi.json)" = 404
 docker exec lotkit-phase5b1 id
 docker exec lotkit-phase5b1 python -m api.cleanup_storage report

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -20,6 +21,9 @@ DEFAULT_TRUSTED_HOSTS = (
 )
 DEFAULT_ARTIFACT_RETENTION_DAYS = 30
 MAX_ARTIFACT_RETENTION_DAYS = 3650
+_HOSTNAME_LABEL = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+)
 
 
 class ConfigurationError(RuntimeError):
@@ -92,6 +96,8 @@ def _canonical_data_dir(
 def _public_base_url(
     environment: str,
     raw_value: str | None,
+    *,
+    source_name: str = "LOTKIT_PUBLIC_BASE_URL",
 ) -> str:
     if raw_value is None or not raw_value.strip():
         if environment == "production":
@@ -112,12 +118,59 @@ def _public_base_url(
         or parsed.query
         or parsed.fragment
     ):
-        raise ConfigurationError("LOTKIT_PUBLIC_BASE_URL is invalid.")
+        raise ConfigurationError(f"{source_name} is invalid.")
     if environment == "production" and parsed.scheme != "https":
         raise ConfigurationError(
-            "Production requires an HTTPS LOTKIT_PUBLIC_BASE_URL."
+            f"Production requires an HTTPS {source_name}."
         )
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _is_render(values: Mapping[str, str]) -> bool:
+    """Recognize only Render's documented platform-indicator value."""
+
+    return values.get("RENDER") == "true"
+
+
+def _resolved_public_base_url(
+    environment: str,
+    values: Mapping[str, str],
+) -> str:
+    explicit = values.get("LOTKIT_PUBLIC_BASE_URL")
+    if explicit is not None and explicit.strip():
+        return _public_base_url(environment, explicit)
+
+    if _is_render(values):
+        render_url = values.get("RENDER_EXTERNAL_URL")
+        if render_url is not None and render_url.strip():
+            return _public_base_url(
+                environment,
+                render_url,
+                source_name="RENDER_EXTERNAL_URL",
+            )
+        if environment == "production":
+            raise ConfigurationError(
+                "Production on Render requires RENDER_EXTERNAL_URL when "
+                "LOTKIT_PUBLIC_BASE_URL is unset."
+            )
+
+    return _public_base_url(environment, explicit)
+
+
+def _render_external_hostname(raw_value: str) -> str:
+    hostname = raw_value.strip().lower()
+    labels = hostname.split(".")
+    if (
+        not hostname
+        or len(hostname) > 253
+        or hostname.endswith(".")
+        or any(
+            not label or _HOSTNAME_LABEL.fullmatch(label) is None
+            for label in labels
+        )
+    ):
+        raise ConfigurationError("RENDER_EXTERNAL_HOSTNAME is invalid.")
+    return hostname
 
 
 def _trusted_hosts(
@@ -144,6 +197,29 @@ def _trusted_hosts(
             "Production requires explicit LOTKIT_TRUSTED_HOSTS."
         )
     return hosts
+
+
+def _resolved_trusted_hosts(
+    environment: str,
+    values: Mapping[str, str],
+) -> tuple[str, ...]:
+    explicit = values.get("LOTKIT_TRUSTED_HOSTS")
+    if explicit is not None and any(
+        host.strip() for host in explicit.split(",")
+    ):
+        return _trusted_hosts(environment, explicit)
+
+    if _is_render(values):
+        render_hostname = values.get("RENDER_EXTERNAL_HOSTNAME")
+        if render_hostname is not None and render_hostname.strip():
+            return (_render_external_hostname(render_hostname),)
+        if environment == "production":
+            raise ConfigurationError(
+                "Production on Render requires RENDER_EXTERNAL_HOSTNAME "
+                "when LOTKIT_TRUSTED_HOSTS is unset."
+            )
+
+    return _trusted_hosts(environment, explicit)
 
 
 def _port(raw_value: str | None) -> int:
@@ -191,14 +267,8 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         environment,
         values.get("LOTKIT_DATA_DIR"),
     )
-    public_base_url = _public_base_url(
-        environment,
-        values.get("LOTKIT_PUBLIC_BASE_URL"),
-    )
-    trusted_hosts = _trusted_hosts(
-        environment,
-        values.get("LOTKIT_TRUSTED_HOSTS"),
-    )
+    public_base_url = _resolved_public_base_url(environment, values)
+    trusted_hosts = _resolved_trusted_hosts(environment, values)
 
     docs_override = values.get("LOTKIT_DOCS_ENABLED")
     docs_enabled = (

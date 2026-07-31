@@ -19,6 +19,9 @@ def _clear_lotkit_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "LOTKIT_TRUSTED_HOSTS",
         "LOTKIT_DOCS_ENABLED",
         "LOTKIT_ARTIFACT_RETENTION_DAYS",
+        "RENDER",
+        "RENDER_EXTERNAL_URL",
+        "RENDER_EXTERNAL_HOSTNAME",
         "PORT",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -199,6 +202,245 @@ def test_production_does_not_accept_a_wildcard_trusted_host(
         "https://lotkit.example",
     )
     monkeypatch.setenv("LOTKIT_TRUSTED_HOSTS", "*")
+
+    with pytest.raises(
+        api.config.ConfigurationError,
+        match="LOTKIT_TRUSTED_HOSTS",
+    ):
+        _reload_settings()
+
+
+def test_explicit_public_url_overrides_render_external_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOTKIT_ENV", "production")
+    monkeypatch.setenv("LOTKIT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "not-a-valid-url")
+    monkeypatch.setenv(
+        "RENDER_EXTERNAL_HOSTNAME",
+        "render-fallback.onrender.com",
+    )
+    monkeypatch.setenv(
+        "LOTKIT_PUBLIC_BASE_URL",
+        "https://explicit.example",
+    )
+    monkeypatch.setenv("LOTKIT_TRUSTED_HOSTS", "explicit.example")
+
+    settings = _reload_settings()
+
+    assert settings.public_base_url == "https://explicit.example"
+
+
+def test_explicit_trusted_hosts_override_render_external_hostname(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOTKIT_ENV", "production")
+    monkeypatch.setenv("LOTKIT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv(
+        "RENDER_EXTERNAL_URL",
+        "https://render-fallback.onrender.com",
+    )
+    monkeypatch.setenv("RENDER_EXTERNAL_HOSTNAME", "malformed/hostname")
+    monkeypatch.delenv("LOTKIT_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.setenv("LOTKIT_TRUSTED_HOSTS", "explicit.example")
+
+    settings = _reload_settings()
+
+    assert settings.trusted_hosts == ("explicit.example",)
+
+
+def test_valid_render_production_fallback_resolves_url_and_trusted_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOTKIT_ENV", "production")
+    monkeypatch.setenv("LOTKIT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv(
+        "RENDER_EXTERNAL_URL",
+        "https://Example-LotKit.onrender.com/",
+    )
+    monkeypatch.setenv(
+        "RENDER_EXTERNAL_HOSTNAME",
+        "Example-LotKit.onrender.com",
+    )
+    monkeypatch.setenv("LOTKIT_PUBLIC_BASE_URL", "   ")
+    monkeypatch.setenv("LOTKIT_TRUSTED_HOSTS", " , \t")
+
+    settings = _reload_settings()
+
+    assert settings.public_base_url == "https://Example-LotKit.onrender.com"
+    assert settings.trusted_hosts == ("example-lotkit.onrender.com",)
+
+
+@pytest.mark.parametrize(
+    "render_url",
+    [
+        "http://example-lotkit.onrender.com",
+        "example-lotkit.onrender.com",
+        "https://user@example-lotkit.onrender.com",
+        "https://example-lotkit.onrender.com/path",
+    ],
+)
+def test_malformed_render_external_url_fails_production_startup(
+    render_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOTKIT_ENV", "production")
+    monkeypatch.setenv("LOTKIT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", render_url)
+    monkeypatch.setenv(
+        "RENDER_EXTERNAL_HOSTNAME",
+        "example-lotkit.onrender.com",
+    )
+    monkeypatch.delenv("LOTKIT_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.delenv("LOTKIT_TRUSTED_HOSTS", raising=False)
+
+    with pytest.raises(
+        api.config.ConfigurationError,
+        match="RENDER_EXTERNAL_URL",
+    ):
+        _reload_settings()
+
+
+@pytest.mark.parametrize(
+    "render_hostname",
+    [
+        "*",
+        "https://example-lotkit.onrender.com",
+        "example-lotkit.onrender.com/path",
+        "example-lotkit.onrender.com:443",
+        "example-lotkit..onrender.com",
+        "-example-lotkit.onrender.com",
+    ],
+)
+def test_malformed_render_external_hostname_fails_production_startup(
+    render_hostname: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOTKIT_ENV", "production")
+    monkeypatch.setenv("LOTKIT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv(
+        "RENDER_EXTERNAL_URL",
+        "https://example-lotkit.onrender.com",
+    )
+    monkeypatch.setenv("RENDER_EXTERNAL_HOSTNAME", render_hostname)
+    monkeypatch.delenv("LOTKIT_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.delenv("LOTKIT_TRUSTED_HOSTS", raising=False)
+
+    with pytest.raises(
+        api.config.ConfigurationError,
+        match="RENDER_EXTERNAL_HOSTNAME",
+    ):
+        _reload_settings()
+
+
+@pytest.mark.parametrize(
+    ("missing_name", "expected_error"),
+    [
+        ("RENDER_EXTERNAL_URL", "RENDER_EXTERNAL_URL"),
+        ("RENDER_EXTERNAL_HOSTNAME", "RENDER_EXTERNAL_HOSTNAME"),
+    ],
+)
+def test_missing_render_fallback_value_fails_production_startup(
+    missing_name: str,
+    expected_error: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOTKIT_ENV", "production")
+    monkeypatch.setenv("LOTKIT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv(
+        "RENDER_EXTERNAL_URL",
+        "https://example-lotkit.onrender.com",
+    )
+    monkeypatch.setenv(
+        "RENDER_EXTERNAL_HOSTNAME",
+        "example-lotkit.onrender.com",
+    )
+    monkeypatch.delenv("LOTKIT_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.delenv("LOTKIT_TRUSTED_HOSTS", raising=False)
+    monkeypatch.delenv(missing_name, raising=False)
+
+    with pytest.raises(
+        api.config.ConfigurationError,
+        match=expected_error,
+    ):
+        _reload_settings()
+
+
+@pytest.mark.parametrize("render_indicator", [None, "1", "yes", "false"])
+def test_render_external_values_are_not_fallbacks_without_exact_indicator(
+    render_indicator: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOTKIT_ENV", "production")
+    monkeypatch.setenv("LOTKIT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv(
+        "RENDER_EXTERNAL_URL",
+        "https://example-lotkit.onrender.com",
+    )
+    monkeypatch.setenv(
+        "RENDER_EXTERNAL_HOSTNAME",
+        "example-lotkit.onrender.com",
+    )
+    monkeypatch.delenv("LOTKIT_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.delenv("LOTKIT_TRUSTED_HOSTS", raising=False)
+    if render_indicator is None:
+        monkeypatch.delenv("RENDER", raising=False)
+    else:
+        monkeypatch.setenv("RENDER", render_indicator)
+
+    with pytest.raises(
+        api.config.ConfigurationError,
+        match="LOTKIT_PUBLIC_BASE_URL",
+    ):
+        _reload_settings()
+
+
+def test_development_ignores_render_external_values_without_indicator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_lotkit_environment(monkeypatch)
+    monkeypatch.setenv(
+        "RENDER_EXTERNAL_URL",
+        "https://example-lotkit.onrender.com",
+    )
+    monkeypatch.setenv(
+        "RENDER_EXTERNAL_HOSTNAME",
+        "example-lotkit.onrender.com",
+    )
+
+    settings = _reload_settings()
+
+    assert settings.environment == "development"
+    assert settings.public_base_url == "http://127.0.0.1:8000"
+    assert "localhost" in settings.trusted_hosts
+
+
+def test_render_hostname_is_not_a_trusted_host_without_exact_indicator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOTKIT_ENV", "production")
+    monkeypatch.setenv("LOTKIT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("LOTKIT_PUBLIC_BASE_URL", "https://explicit.example")
+    monkeypatch.delenv("LOTKIT_TRUSTED_HOSTS", raising=False)
+    monkeypatch.setenv("RENDER", "yes")
+    monkeypatch.setenv(
+        "RENDER_EXTERNAL_HOSTNAME",
+        "example-lotkit.onrender.com",
+    )
 
     with pytest.raises(
         api.config.ConfigurationError,

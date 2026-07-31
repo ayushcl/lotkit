@@ -123,8 +123,15 @@ to delivery-link secret exchange.
 
 The application derives its throttle identity only from
 `request.client.host`, after Uvicorn has applied its proxy-trust rules; it does
-not parse forwarding headers. The container trusts loopback by default. Set
-`LOTKIT_FORWARDED_ALLOW_IPS` to the reviewed direct proxy peers or networks at
-deployment time—never a production wildcard—and perform a forwarding-header
-spoof test before inviting pilot users. See [deployment notes](docs/deployment.md)
-for the trust-boundary checklist.
+not parse forwarding headers. On Render, an unset
+`LOTKIT_PUBLIC_BASE_URL`/`LOTKIT_TRUSTED_HOSTS` pair falls back only to
+Render's official `RENDER_EXTERNAL_URL` and `RENDER_EXTERNAL_HOSTNAME` when
+`RENDER` is exactly `true`. Explicit LotKit values always win; non-Render
+production still requires them.
+
+The container trusts loopback by default. `LOTKIT_FORWARDED_ALLOW_IPS` remains
+a separate manual setting for reviewed direct proxy peers or networks. Never
+use a production wildcard, and do not open the initial private deployment to
+pilot users until live forwarding-header spoof and client-separation tests
+pass. See [deployment notes](docs/deployment.md) for the trust-boundary
+checklist.
