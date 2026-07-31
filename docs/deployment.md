@@ -8,10 +8,9 @@ automatic deploys disabled. Treat deployment as a separate reviewed
 operation.
 
 There is no public signup, automated password reset, email verification,
-OAuth, or JWT authentication. Before public launch, add robust persistent
-login throttling. Do not substitute a process-local in-memory limiter or a
-fixed per-account lockout: either design is unsuitable for this recovery
-model.
+OAuth, or JWT authentication. Owner login throttling is persistent in SQLite
+and keyed only by a SHA-256 derivative of the canonical client IP. It is not a
+process-local limiter and never locks an email address or account.
 
 Recipient share URLs retain the Phase 5a.1 design:
 
@@ -35,6 +34,7 @@ Set these environment variables:
 | `LOTKIT_DATA_DIR` | Yes | An absolute persistent path, `/var/data` on Render |
 | `LOTKIT_PUBLIC_BASE_URL` | Yes | Canonical public HTTPS origin, with no path or trailing slash |
 | `LOTKIT_TRUSTED_HOSTS` | Yes | Comma-separated accepted hostnames, without schemes or paths |
+| `LOTKIT_FORWARDED_ALLOW_IPS` | Yes | Reviewed direct proxy IPs/networks Uvicorn may trust; never use a production wildcard |
 | `LOTKIT_ARTIFACT_RETENTION_DAYS` | Optional | Positive integer from 1 through 3650; defaults to `30` |
 | `PORT` | Supplied by Render | Platform-assigned port |
 | `LOTKIT_DOCS_ENABLED` | Optional | Leave unset to disable production docs |
@@ -45,9 +45,24 @@ Set these environment variables:
 deployment-specific. Passwords, session values, CSRF values, and delivery
 secrets must never appear in `render.yaml`, image arguments, or logs.
 
-Render terminates HTTPS at its edge. The production Uvicorn command trusts
-that proxy boundary, while public URLs come only from
-`LOTKIT_PUBLIC_BASE_URL`, not the incoming `Host` header.
+Render terminates HTTPS at its edge. Configure
+`LOTKIT_FORWARDED_ALLOW_IPS` in the Render Dashboard with only the verified
+direct proxy peers or networks. Uvicorn applies that trust decision before
+the application sees the request; the login throttle then uses only
+`request.client.host`. Application code deliberately does not read
+`X-Forwarded-For`, `Forwarded`, `X-Real-IP`, or provider-specific equivalents.
+The container default is loopback-only (`127.0.0.1`), not `*`. Public URLs
+still come only from `LOTKIT_PUBLIC_BASE_URL`, not the incoming `Host` header.
+Uvicorn access logs remain enabled. Owner-authentication application logs stay
+generic and never include email, passwords, request bodies, cookies, session
+or CSRF credentials, throttle keys, or forwarding-header contents.
+
+Before inviting pilot users, run a post-deployment spoof test from outside the
+trusted proxy boundary: changing a supplied forwarding header must not change
+the observed throttle identity. Also confirm requests through Render resolve
+to the real client identity rather than one shared proxy IP. A wrong boundary
+can either let callers rotate spoofed IPs or make unrelated users share a
+bucket.
 
 The runtime image installs `requirements-runtime.txt`; its application
 versions stay aligned with `requirements.txt` while pytest remains
@@ -195,6 +210,22 @@ CSRF cookie value in `X-CSRF-Token` and an `Origin` exactly equal to
 requires the exact Origin. Authentication responses use `Cache-Control:
 no-store`.
 
+`POST /api/auth/login` permits seven failed credential checks per canonical
+client IP in a 15-minute window. Failure eight starts a 15-minute block and
+returns the generic `429` body `{"detail":"Too many login attempts. Try again
+later."}` with a numeric, rounded-up `Retry-After` of at least one second.
+Blocked requests are rejected before Argon2. A successful login before the
+threshold clears the IP bucket; expired partial windows and expired blocks
+restart cleanly. Stale rows are removed opportunistically.
+
+The bucket key is a deterministic SHA-256 value derived from Python's
+canonical IPv4/IPv6 representation. No raw IP or key is logged. If ASGI peer
+data is missing or malformed, requests use one deterministic shared
+unavailable-peer bucket; this conservative fallback cannot be used to create
+unbounded identities. The route still requires the exact Origin and remains
+exempt from session-bound CSRF exactly as before. Phase 5b.1 does not throttle
+the separate delivery fragment-secret exchange under `/d/*`.
+
 Owner authentication is never applied to `/d/*`; recipient routes continue
 using the separate fragment-secret and delivery-session architecture.
 
@@ -203,7 +234,7 @@ using the separate fragment-secret and delivery-session architecture.
 Build:
 
 ```bash
-docker build --tag lotkit:phase5c0 .
+docker build --tag lotkit:phase5b1 .
 ```
 
 Start with isolated storage:
@@ -213,16 +244,17 @@ LOTKIT_DOCKER_DATA="$(mktemp -d)"
 chmod 770 "$LOTKIT_DOCKER_DATA"
 
 docker run --detach \
-  --name lotkit-phase5c0 \
+  --name lotkit-phase5b1 \
   --group-add "$(id -g)" \
   --publish 8000:8000 \
   --env LOTKIT_ENV=production \
   --env LOTKIT_DATA_DIR=/var/data \
   --env LOTKIT_PUBLIC_BASE_URL=https://lotkit.invalid \
   --env LOTKIT_TRUSTED_HOSTS=lotkit.invalid,localhost,127.0.0.1 \
+  --env LOTKIT_FORWARDED_ALLOW_IPS=127.0.0.1 \
   --env PORT=8000 \
   --mount "type=bind,src=$LOTKIT_DOCKER_DATA,dst=/var/data" \
-  lotkit:phase5c0
+  lotkit:phase5b1
 ```
 
 Verify:
@@ -237,10 +269,10 @@ test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   http://localhost:8000/docs)" = 404
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   http://localhost:8000/openapi.json)" = 404
-docker exec lotkit-phase5c0 id
-docker exec lotkit-phase5c0 python -m api.cleanup_storage report
-docker exec lotkit-phase5c0 python -m api.cleanup_storage plan
-docker logs lotkit-phase5c0
+docker exec lotkit-phase5b1 id
+docker exec lotkit-phase5b1 python -m api.cleanup_storage report
+docker exec lotkit-phase5b1 python -m api.cleanup_storage plan
+docker logs lotkit-phase5b1
 ```
 
 `id` must report UID/GID `10001`. The root page must contain the login-capable
@@ -251,8 +283,8 @@ their generic bootstrap/unavailable behavior without an owner session.
 Stop and remove the disposable container:
 
 ```bash
-docker stop lotkit-phase5c0
-docker rm lotkit-phase5c0
+docker stop lotkit-phase5b1
+docker rm lotkit-phase5b1
 ```
 
 Use an authenticated browser and disposable records for persistence checks.

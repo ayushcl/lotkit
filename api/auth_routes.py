@@ -22,6 +22,15 @@ from api.auth import (
     revoke_session,
 )
 from api.db import connect_db
+from api.login_throttle import (
+    THROTTLED_LOGIN_DETAIL,
+    ThrottleDecision,
+    begin_login_attempt,
+    clear_login_failures,
+    client_key_for_request,
+    record_login_failure,
+    utc_now as throttle_utc_now,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 LOGGER = logging.getLogger("uvicorn.error")
@@ -97,24 +106,64 @@ def _clear_auth_cookies(response: Response, request: Request) -> None:
     )
 
 
+def _throttled_response(decision: ThrottleDecision) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={"detail": THROTTLED_LOGIN_DETAIL},
+        headers={
+            **NO_STORE_HEADERS,
+            "Retry-After": str(decision.retry_after_seconds),
+        },
+    )
+
+
 @router.post("/login")
 def login(payload: LoginRequest, request: Request) -> JSONResponse:
     require_exact_origin(request)
+    client_key = client_key_for_request(request)
+    attempted_at = throttle_utc_now()
     connection = connect_db()
     try:
+        throttle = begin_login_attempt(
+            connection,
+            client_key,
+            now=attempted_at,
+        )
+        if throttle is not None:
+            connection.commit()
+            LOGGER.warning("Owner login throttled.")
+            return _throttled_response(throttle)
+
         user = authenticate_credentials(
             connection,
             payload.email,
             payload.password,
         )
         if user is None:
+            throttle = record_login_failure(
+                connection,
+                client_key,
+                now=attempted_at,
+            )
+            connection.commit()
+            if throttle is not None:
+                LOGGER.warning("Owner login throttled.")
+                return _throttled_response(throttle)
             LOGGER.warning("Owner login failed.")
             return JSONResponse(
                 status_code=401,
                 content={"detail": GENERIC_LOGIN_DETAIL},
                 headers=NO_STORE_HEADERS,
             )
-        session = create_session(connection, int(user["id"]))
+        clear_login_failures(connection, client_key)
+        session = create_session(
+            connection,
+            int(user["id"]),
+            now=attempted_at,
+        )
+    except Exception:
+        connection.rollback()
+        raise
     finally:
         connection.close()
 

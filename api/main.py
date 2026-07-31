@@ -111,6 +111,7 @@ REQUIRED_TABLES = frozenset(
         "delivery_links",
         "delivery_sessions",
         "user_sessions",
+        "login_throttle_buckets",
         "storage_cleanup_jobs",
     }
 )

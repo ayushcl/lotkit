@@ -36,4 +36,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import os, urllib.parse, urllib.request; port = os.environ.get('PORT', '8000'); host = urllib.parse.urlsplit(os.environ.get('LOTKIT_PUBLIC_BASE_URL', '')).netloc or '127.0.0.1'; request = urllib.request.Request('http://127.0.0.1:' + port + '/health', headers={'Host': host}); urllib.request.urlopen(request, timeout=3).read()"
 
-CMD ["sh", "-c", "exec python -m uvicorn api.main:app --host 0.0.0.0 --port \"${PORT:-8000}\" --workers 1 --proxy-headers --forwarded-allow-ips=\"*\""]
+CMD ["sh", "-c", "exec python -m uvicorn api.main:app --host 0.0.0.0 --port \"${PORT:-8000}\" --workers 1 --proxy-headers --forwarded-allow-ips=\"${LOTKIT_FORWARDED_ALLOW_IPS:-127.0.0.1}\""]

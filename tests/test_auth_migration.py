@@ -167,6 +167,30 @@ def test_fresh_auth_schema_has_constraints_sessions_and_no_seeded_user(
             )
         }
         assert foreign_keys["user_id"] == ("users", "id", "CASCADE")
+
+        throttle_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(login_throttle_buckets)"
+            )
+        }
+        assert throttle_columns == {
+            "client_key",
+            "failure_count",
+            "window_start_utc",
+            "blocked_until_utc",
+            "updated_utc",
+        }
+        throttle_indexes = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA index_list(login_throttle_buckets)"
+            )
+        }
+        assert {
+            "login_throttle_buckets_updated_utc_idx",
+            "login_throttle_buckets_blocked_until_utc_idx",
+        } <= throttle_indexes
     finally:
         connection.close()
 
@@ -196,6 +220,79 @@ def test_phase_5a_migration_is_additive_idempotent_and_preserves_ownership(
         assert connection.execute(
             "SELECT owner_id FROM delivery_links WHERE id = 31"
         ).fetchone()["owner_id"] == 17
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        connection.close()
+
+
+def test_phase_5c_database_adds_throttle_without_losing_existing_data(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "phase5c.db"
+    init_db(path)
+    connection = connect_db(path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO users (
+                id, email, password_hash, created_utc
+            ) VALUES (41, 'existing@example.com', 'existing-hash', 'created')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO user_sessions (
+                id, user_id, session_hash, csrf_hash, created_utc,
+                expires_utc, last_seen_utc
+            ) VALUES (
+                42, 41, 'session-hash', 'csrf-hash', 'created',
+                'expires', 'seen'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO runs (id, run_id, owner_id, vin)
+            VALUES (43, 'existing-run', 41, '1HGCM82633A004352')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO delivery_links (
+                id, owner_id, run_id, public_id, token_hash, token_hint,
+                artifact_manifest_json, created_utc, expires_utc
+            ) VALUES (
+                44, 41, 'existing-run', 'existing-public',
+                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                'hint', '{}', 'created', 'expires'
+            )
+            """
+        )
+        connection.execute("DROP TABLE login_throttle_buckets")
+        connection.commit()
+    finally:
+        connection.close()
+
+    init_db(path)
+    init_db(path)
+    connection = connect_db(path)
+    try:
+        assert connection.execute(
+            "SELECT email FROM users WHERE id = 41"
+        ).fetchone()["email"] == "existing@example.com"
+        assert connection.execute(
+            "SELECT user_id FROM user_sessions WHERE id = 42"
+        ).fetchone()["user_id"] == 41
+        assert connection.execute(
+            "SELECT owner_id FROM runs WHERE id = 43"
+        ).fetchone()["owner_id"] == 41
+        assert connection.execute(
+            "SELECT owner_id FROM delivery_links WHERE id = 44"
+        ).fetchone()["owner_id"] == 41
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name = ?",
+            ("login_throttle_buckets",),
+        ).fetchone() is not None
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         connection.close()

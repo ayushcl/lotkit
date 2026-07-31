@@ -11,6 +11,8 @@ import api.main
 from api.main import create_app
 from api.runs import InvalidRunDataError, safe_run_directory
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _settings_for(
     monkeypatch: pytest.MonkeyPatch,
@@ -290,6 +292,27 @@ def test_trusted_hosts_reject_an_unconfigured_host_in_production(
         )
 
     assert response.status_code == 400
+
+
+def test_container_proxy_trust_is_explicit_and_loopback_by_default() -> None:
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "--proxy-headers" in dockerfile
+    assert "--no-access-log" not in dockerfile
+    assert '--forwarded-allow-ips=\\"*\\"' not in dockerfile
+    assert (
+        '--forwarded-allow-ips=\\"${LOTKIT_FORWARDED_ALLOW_IPS:-127.0.0.1}\\"'
+        in dockerfile
+    )
+
+
+def test_render_requires_manual_direct_proxy_trust_configuration() -> None:
+    blueprint = (PROJECT_ROOT / "render.yaml").read_text(encoding="utf-8")
+
+    declaration = "- key: LOTKIT_FORWARDED_ALLOW_IPS\n        sync: false"
+    assert declaration in blueprint
+    assert "Direct proxy peers Uvicorn may trust" in blueprint
+    assert "LOTKIT_FORWARDED_ALLOW_IPS\n        value: \"*\"" not in blueprint
 
 
 def test_run_traversal_protection_uses_the_configured_root(

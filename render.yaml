@@ -19,6 +19,9 @@ services:
         sync: false
       - key: LOTKIT_TRUSTED_HOSTS
         sync: false
+      # Direct proxy peers Uvicorn may trust to supply forwarded client IPs.
+      - key: LOTKIT_FORWARDED_ALLOW_IPS
+        sync: false
       - key: LOTKIT_ARTIFACT_RETENTION_DAYS
         value: "30"
     disk:

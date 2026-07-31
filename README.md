@@ -105,12 +105,26 @@ separate:
 - SQLite stores only SHA-256 hashes of the random owner session and CSRF
   credentials. Unsafe owner API requests require the session-bound
   `X-CSRF-Token` plus an exact `Origin` match.
+- Owner login failures are throttled persistently by client IP: attempts one
+  through seven in a 15-minute window retain the generic `401`; failure eight
+  starts a 15-minute block and returns `429` with `Retry-After`. SQLite stores
+  only a deterministic SHA-256 bucket key, never the raw IP, and a successful
+  pre-threshold login clears that IP's failures. This is not an account or
+  email lockout.
 - Recipient links continue to use the separate `lotkit_delivery_session`
   cookie and fragment-secret exchange. Owner CSRF/authentication is never
   applied to `/d/*`.
 
 For controlled-beta password recovery, an operator runs
 `python -m api.manage_users set-password`. Changing a password or disabling
-an account revokes all of that account's existing sessions. Robust persistent
-login throttling remains required before a public launch; LotKit deliberately
-does not use a process-local limiter or fixed account lockout.
+an account revokes all of that account's existing sessions. The login throttle
+is SQLite-backed rather than process-local, and intentionally does not apply
+to delivery-link secret exchange.
+
+The application derives its throttle identity only from
+`request.client.host`, after Uvicorn has applied its proxy-trust rules; it does
+not parse forwarding headers. The container trusts loopback by default. Set
+`LOTKIT_FORWARDED_ALLOW_IPS` to the reviewed direct proxy peers or networks at
+deployment time—never a production wildcard—and perform a forwarding-header
+spoof test before inviting pilot users. See [deployment notes](docs/deployment.md)
+for the trust-boundary checklist.

@@ -140,6 +140,24 @@ def _migrate_user_authentication(
 
             CREATE INDEX IF NOT EXISTS user_sessions_expires_utc_idx
             ON user_sessions(expires_utc);
+
+            CREATE TABLE IF NOT EXISTS login_throttle_buckets (
+                client_key TEXT PRIMARY KEY
+                    CHECK (length(client_key) = 64),
+                failure_count INTEGER NOT NULL
+                    CHECK (failure_count >= 0),
+                window_start_utc TEXT NOT NULL,
+                blocked_until_utc TEXT,
+                updated_utc TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS
+                login_throttle_buckets_updated_utc_idx
+            ON login_throttle_buckets(updated_utc);
+
+            CREATE INDEX IF NOT EXISTS
+                login_throttle_buckets_blocked_until_utc_idx
+            ON login_throttle_buckets(blocked_until_utc);
             """
         )
     except sqlite3.IntegrityError as exc:
