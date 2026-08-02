@@ -294,31 +294,39 @@ def test_trusted_hosts_reject_an_unconfigured_host_in_production(
     assert response.status_code == 400
 
 
-def test_container_proxy_trust_is_explicit_and_loopback_by_default() -> None:
+def test_container_disables_proxy_headers_and_keeps_access_logs() -> None:
     dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
-    assert "--proxy-headers" in dockerfile
+    assert "--no-proxy-headers" in dockerfile
+    assert "--proxy-headers" not in dockerfile
+    assert "--forwarded-allow-ips" not in dockerfile
+    assert "LOTKIT_FORWARDED_ALLOW_IPS" not in dockerfile
+    assert "10.0.0.0/8" not in dockerfile
     assert "--no-access-log" not in dockerfile
-    assert '--forwarded-allow-ips=\\"*\\"' not in dockerfile
-    assert (
-        '--forwarded-allow-ips=\\"${LOTKIT_FORWARDED_ALLOW_IPS:-127.0.0.1}\\"'
-        in dockerfile
-    )
     assert "os.environ.get('RENDER') == 'true'" in dockerfile
     assert "RENDER_EXTERNAL_URL" in dockerfile
     assert "RENDER_EXTERNAL_HOSTNAME" in dockerfile
 
 
-def test_render_requires_manual_direct_proxy_trust_configuration() -> None:
+def test_render_uses_fail_closed_container_startup_without_forwarded_trust() -> None:
     blueprint = (PROJECT_ROOT / "render.yaml").read_text(encoding="utf-8")
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
+    assert blueprint.count("- type: web") == 1
+    assert "runtime: docker" in blueprint
+    assert "--no-proxy-headers" in dockerfile
     assert "- key: LOTKIT_PUBLIC_BASE_URL" not in blueprint
     assert "- key: LOTKIT_TRUSTED_HOSTS" not in blueprint
-    declaration = "- key: LOTKIT_FORWARDED_ALLOW_IPS\n        sync: false"
-    assert declaration in blueprint
-    assert "Direct proxy peers Uvicorn may trust" in blueprint
-    assert "LOTKIT_FORWARDED_ALLOW_IPS\n        value: \"*\"" not in blueprint
+    assert "LOTKIT_FORWARDED_ALLOW_IPS" not in blueprint
+    assert "--forwarded-allow-ips" not in blueprint
+    assert "10.0.0.0/8" not in blueprint
+    assert 'value: "*"' not in blueprint
+    assert 'autoDeployTrigger: "off"' in blueprint
+    assert "numInstances: 1" in blueprint
+    assert "healthCheckPath: /health" in blueprint
+    assert "mountPath: /var/data" in blueprint
     assert "sizeGB: 5" in blueprint
+    assert 'value: "30"' in blueprint
 
 
 def test_run_traversal_protection_uses_the_configured_root(

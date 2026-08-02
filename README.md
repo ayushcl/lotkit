@@ -105,12 +105,12 @@ separate:
 - SQLite stores only SHA-256 hashes of the random owner session and CSRF
   credentials. Unsafe owner API requests require the session-bound
   `X-CSRF-Token` plus an exact `Origin` match.
-- Owner login failures are throttled persistently by client IP: attempts one
-  through seven in a 15-minute window retain the generic `401`; failure eight
-  starts a 15-minute block and returns `429` with `Retry-After`. SQLite stores
-  only a deterministic SHA-256 bucket key, never the raw IP, and a successful
-  pre-threshold login clears that IP's failures. This is not an account or
-  email lockout.
+- Owner login failures are throttled persistently by direct transport peer:
+  attempts one through seven in a 15-minute window retain the generic `401`;
+  failure eight starts a 15-minute block and returns `429` with
+  `Retry-After`. SQLite stores only a deterministic SHA-256 bucket key, never
+  the raw peer address, and a successful pre-threshold login clears that
+  peer's failures. This is not an account or email lockout.
 - Recipient links continue to use the separate `lotkit_delivery_session`
   cookie and fragment-secret exchange. Owner CSRF/authentication is never
   applied to `/d/*`.
@@ -121,17 +121,20 @@ an account revokes all of that account's existing sessions. The login throttle
 is SQLite-backed rather than process-local, and intentionally does not apply
 to delivery-link secret exchange.
 
-The application derives its throttle identity only from
-`request.client.host`, after Uvicorn has applied its proxy-trust rules; it does
-not parse forwarding headers. On Render, an unset
+The shipped container starts Uvicorn with `--no-proxy-headers`. The application
+derives its throttle identity only from the resulting `request.client.host`
+direct transport peer and does not parse forwarding headers. On Render, this
+value is conservatively the direct Render proxy peer; it is not claimed to be
+the end user's public IP. Forged forwarding headers cannot select a different
+bucket, although multiple users routed through one peer can share a bucket.
+On Render, an unset
 `LOTKIT_PUBLIC_BASE_URL`/`LOTKIT_TRUSTED_HOSTS` pair falls back only to
 Render's official `RENDER_EXTERNAL_URL` and `RENDER_EXTERNAL_HOSTNAME` when
 `RENDER` is exactly `true`. Explicit LotKit values always win; non-Render
 production still requires them.
 
-The container trusts loopback by default. `LOTKIT_FORWARDED_ALLOW_IPS` remains
-a separate manual setting for reviewed direct proxy peers or networks. Never
-use a production wildcard, and do not open the initial private deployment to
-pilot users until live forwarding-header spoof and client-separation tests
-pass. See [deployment notes](docs/deployment.md) for the trust-boundary
-checklist.
+The default container startup does not trust `X-Forwarded-For`,
+`X-Forwarded-Proto`, or any other proxy header from any source. Keep this
+fail-closed startup for the Render pilot and complete the forwarding-header
+spoof test before reopening it. See [deployment notes](docs/deployment.md) for
+the trust-boundary checklist.

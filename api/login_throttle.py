@@ -1,4 +1,4 @@
-"""Persistent, IP-scoped throttling for owner login attempts."""
+"""Persistent, direct-transport-peer throttling for owner login attempts."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def client_key_for_peer(value: object) -> str:
 
 
 def client_key_for_request(request: Request) -> str:
-    """Use only the ASGI peer after the server's proxy-trust processing."""
+    """Use only Uvicorn's direct peer; the shipped server ignores proxies."""
 
     peer = request.client
     host = peer.host if peer is not None else None
@@ -212,7 +212,7 @@ def clear_login_failures(
     connection: sqlite3.Connection,
     client_key: str,
 ) -> None:
-    """Clear an IP bucket after a successful pre-threshold login."""
+    """Clear a transport-peer bucket after a successful login."""
 
     connection.execute(
         "DELETE FROM login_throttle_buckets WHERE client_key = ?",

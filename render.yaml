@@ -16,9 +16,6 @@ services:
       - key: LOTKIT_DATA_DIR
         value: /var/data
       # Render supplies RENDER_EXTERNAL_URL and RENDER_EXTERNAL_HOSTNAME.
-      # Direct proxy peers Uvicorn may trust to supply forwarded client IPs.
-      - key: LOTKIT_FORWARDED_ALLOW_IPS
-        sync: false
       - key: LOTKIT_ARTIFACT_RETENTION_DAYS
         value: "30"
     disk:

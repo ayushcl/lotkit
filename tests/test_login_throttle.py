@@ -1,11 +1,13 @@
+import asyncio
 import concurrent.futures
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from fastapi import FastAPI, Request
+import uvicorn
+from fastapi import Request
 from fastapi.testclient import TestClient
-from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 import api.auth_routes
 from api.auth import (
@@ -32,7 +34,6 @@ PASSWORD = "correct horse battery staple"
 WRONG_PASSWORD = "wrong password value"
 CLIENT_A = ("192.0.2.10", 51000)
 CLIENT_B = ("198.51.100.20", 52000)
-TRUSTED_PROXY = ("192.0.2.254", 53000)
 BASE_TIME = datetime(2026, 7, 31, 12, 0, tzinfo=timezone.utc)
 
 
@@ -334,7 +335,65 @@ def test_peer_canonicalization_and_unavailable_bucket_are_deterministic() -> Non
     )
 
 
-def test_forged_forwarding_headers_do_not_create_new_application_bucket(
+def test_uvicorn_no_proxy_headers_preserves_the_direct_transport_peer() -> None:
+    async def probe(scope, receive, send) -> None:
+        body = json.dumps(
+            {"host": scope["client"][0], "scheme": scope["scheme"]}
+        ).encode()
+        await send(
+            {"type": "http.response.start", "status": 200, "headers": []}
+        )
+        await send({"type": "http.response.body", "body": body})
+
+    config = uvicorn.Config(
+        probe,
+        proxy_headers=False,
+        lifespan="off",
+        access_log=False,
+        log_level="warning",
+    )
+    config.load()
+    assert config.proxy_headers is False
+    sent_messages: list[dict] = []
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/peer",
+        "raw_path": b"/peer",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"x-forwarded-for", b"1.2.3.4, 5.6.7.8"),
+            (b"x-forwarded-for", b"9.10.11.12"),
+            (b"x-forwarded-proto", b"https"),
+            (b"forwarded", b"for=13.14.15.16;proto=https"),
+            (b"x-real-ip", b"17.18.19.20"),
+            (b"true-client-ip", b"21.22.23.24"),
+        ],
+        "client": CLIENT_A,
+        "server": ("127.0.0.1", 8000),
+    }
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict) -> None:
+        sent_messages.append(message)
+
+    assert config.loaded_app is not None
+    asyncio.run(config.loaded_app(scope, receive, send))
+
+    assert sent_messages[0]["status"] == 200
+    assert json.loads(sent_messages[1]["body"]) == {
+        "host": CLIENT_A[0],
+        "scheme": "http",
+    }
+
+
+def test_different_forged_xff_values_share_one_direct_peer_bucket(
     isolated_persistence,
     monkeypatch: pytest.MonkeyPatch,
     throttle_clock,
@@ -342,109 +401,91 @@ def test_forged_forwarding_headers_do_not_create_new_application_bucket(
     _set_owner_password(isolated_persistence["owner_id"])
     _use_fast_credentials(monkeypatch)
     with TestClient(app, client=CLIENT_A) as client:
-        for _ in range(FAILURE_THRESHOLD - 1):
-            response = _login(
-                client,
-                isolated_persistence,
-                headers={"X-Forwarded-For": "203.0.113.1"},
-            )
-            assert response.status_code == 401
-        eighth = _login(
+        first = _login(
             client,
             isolated_persistence,
-            headers={
-                "X-Forwarded-For": "203.0.113.200",
-                "Forwarded": "for=198.51.100.99",
-                "X-Real-IP": "192.0.2.99",
-            },
+            headers={"X-Forwarded-For": "1.2.3.4"},
+        )
+        second = _login(
+            client,
+            isolated_persistence,
+            headers={"X-Forwarded-For": "5.6.7.8"},
         )
 
-    assert eighth.status_code == 429
-    assert len(_throttle_rows()) == 1
-    assert _throttle_rows()[0]["client_key"] == client_key_for_peer(CLIENT_A[0])
+    assert first.status_code == second.status_code == 401
+    rows = _throttle_rows()
+    assert len(rows) == 1
+    assert rows[0]["failure_count"] == 2
+    assert rows[0]["client_key"] == client_key_for_peer(CLIENT_A[0])
 
 
-def test_real_proxy_middleware_uses_first_untrusted_hop_not_forged_prefix() -> None:
-    probe = FastAPI()
-
-    @probe.get("/peer")
-    def peer(request: Request) -> dict[str, str]:
-        assert request.client is not None
-        return {"host": request.client.host}
-
-    explicit_trust = ProxyHeadersMiddleware(
-        probe,
-        trusted_hosts=[TRUSTED_PROXY[0]],
-    )
-    wildcard_trust = ProxyHeadersMiddleware(probe, trusted_hosts="*")
-    forwarded_chain = "203.0.113.17, 198.51.100.42"
-
-    with TestClient(explicit_trust, client=TRUSTED_PROXY) as client:
-        explicit = client.get(
-            "/peer",
-            headers={"X-Forwarded-For": forwarded_chain},
-        )
-    with TestClient(wildcard_trust, client=TRUSTED_PROXY) as client:
-        wildcard = client.get(
-            "/peer",
-            headers={"X-Forwarded-For": forwarded_chain},
-        )
-
-    assert explicit.json() == {"host": "198.51.100.42"}
-    # Wildcard trust selects the leftmost, attacker-controlled entry, which is
-    # why LotKit never uses "*" as its production default.
-    assert wildcard.json() == {"host": "203.0.113.17"}
-
-
-def test_real_proxy_middleware_prefix_changes_share_actual_client_bucket(
+def test_repeated_and_multi_entry_forwarding_headers_cannot_create_buckets(
     isolated_persistence,
     monkeypatch: pytest.MonkeyPatch,
     throttle_clock,
 ) -> None:
     _set_owner_password(isolated_persistence["owner_id"])
     _use_fast_credentials(monkeypatch)
-    proxied_app = ProxyHeadersMiddleware(
-        app,
-        trusted_hosts=[TRUSTED_PROXY[0]],
-    )
-    actual_client = "198.51.100.42"
+    origin = isolated_persistence["settings"].public_origin
 
-    with TestClient(proxied_app, client=TRUSTED_PROXY) as client:
-        responses = [
-            _login(
-                client,
-                isolated_persistence,
-                headers={
-                    "X-Forwarded-For": f"203.0.113.{prefix}, {actual_client}"
-                },
+    with TestClient(app, client=CLIENT_A) as client:
+        responses = []
+        for suffix in range(2):
+            responses.append(
+                client.post(
+                    "/api/auth/login",
+                    headers=[
+                        ("Origin", origin),
+                        (
+                            "X-Forwarded-For",
+                            f"203.0.113.{suffix}, 198.51.100.{suffix}",
+                        ),
+                        ("X-Forwarded-For", f"192.0.2.{suffix}"),
+                        ("Forwarded", f"for=198.18.0.{suffix}"),
+                        ("X-Real-IP", f"198.19.0.{suffix}"),
+                        ("True-Client-IP", f"198.20.0.{suffix}"),
+                    ],
+                    json={
+                        "email": "photographer@example.com",
+                        "password": WRONG_PASSWORD,
+                    },
+                )
             )
-            for prefix in range(1, FAILURE_THRESHOLD + 1)
-        ]
-        independent_client = _login(
-            client,
+
+    assert [response.status_code for response in responses] == [401, 401]
+    rows = _throttle_rows()
+    assert len(rows) == 1
+    assert rows[0]["failure_count"] == 2
+    assert rows[0]["client_key"] == client_key_for_peer(CLIENT_A[0])
+
+
+def test_distinct_direct_transport_peers_create_distinct_buckets(
+    isolated_persistence,
+    monkeypatch: pytest.MonkeyPatch,
+    throttle_clock,
+) -> None:
+    _set_owner_password(isolated_persistence["owner_id"])
+    _use_fast_credentials(monkeypatch)
+
+    with (
+        TestClient(app, client=CLIENT_A) as first_client,
+        TestClient(app, client=CLIENT_B) as second_client,
+    ):
+        first = _login(
+            first_client,
             isolated_persistence,
-            headers={
-                "X-Forwarded-For": "203.0.113.99, 198.51.100.43"
-            },
+            headers={"X-Forwarded-For": "203.0.113.10"},
         )
-        still_blocked = _login(
-            client,
+        second = _login(
+            second_client,
             isolated_persistence,
-            headers={
-                "X-Forwarded-For": "203.0.113.100, 198.51.100.42"
-            },
-            password=PASSWORD,
+            headers={"X-Forwarded-For": "203.0.113.10"},
         )
 
-    assert [response.status_code for response in responses] == [
-        *([401] * (FAILURE_THRESHOLD - 1)),
-        429,
-    ]
-    assert independent_client.status_code == 401
-    assert still_blocked.status_code == 429
+    assert first.status_code == second.status_code == 401
     assert {row["client_key"] for row in _throttle_rows()} == {
-        client_key_for_peer("198.51.100.42"),
-        client_key_for_peer("198.51.100.43"),
+        client_key_for_peer(CLIENT_A[0]),
+        client_key_for_peer(CLIENT_B[0]),
     }
 
 

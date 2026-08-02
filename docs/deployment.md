@@ -9,8 +9,8 @@ operation.
 
 There is no public signup, automated password reset, email verification,
 OAuth, or JWT authentication. Owner login throttling is persistent in SQLite
-and keyed only by a SHA-256 derivative of the canonical client IP. It is not a
-process-local limiter and never locks an email address or account.
+and keyed only by a SHA-256 derivative of the canonical direct transport peer.
+It is not a process-local limiter and never locks an email address or account.
 
 Recipient share URLs retain the Phase 5a.1 design:
 
@@ -34,7 +34,6 @@ Set these environment variables:
 | `LOTKIT_DATA_DIR` | Yes | An absolute persistent path, `/var/data` on Render |
 | `LOTKIT_PUBLIC_BASE_URL` | Conditional | Explicit canonical HTTPS origin override; required in non-Render production |
 | `LOTKIT_TRUSTED_HOSTS` | Conditional | Explicit comma-separated hostname override; required in non-Render production |
-| `LOTKIT_FORWARDED_ALLOW_IPS` | Yes | Reviewed direct proxy IPs/networks Uvicorn may trust; never use a production wildcard |
 | `RENDER` | Supplied by Render | Exact platform indicator value `true` |
 | `RENDER_EXTERNAL_URL` | Supplied by Render | Fallback canonical public URL when the LotKit override is empty |
 | `RENDER_EXTERNAL_HOSTNAME` | Supplied by Render | Fallback trusted hostname when the LotKit override is empty |
@@ -54,25 +53,27 @@ startup; incoming `Host` or forwarding headers never fill configuration.
 Passwords, session values, CSRF values, and delivery secrets must never appear
 in `render.yaml`, image arguments, or logs.
 
-Render terminates HTTPS at its edge. Configure
-`LOTKIT_FORWARDED_ALLOW_IPS` in the Render Dashboard with only the verified
-direct proxy peers or networks. Uvicorn applies that trust decision before
-the application sees the request; the login throttle then uses only
-`request.client.host`. Application code deliberately does not read
-`X-Forwarded-For`, `Forwarded`, `X-Real-IP`, or provider-specific equivalents.
-The container default is loopback-only (`127.0.0.1`), not `*`. Public URLs
-still come only from `LOTKIT_PUBLIC_BASE_URL`, not the incoming `Host` header.
-Uvicorn access logs remain enabled. Owner-authentication application logs stay
-generic and never include email, passwords, request bodies, cookies, session
-or CSRF credentials, throttle keys, or forwarding-header contents.
+Render terminates HTTPS at its edge. The shipped container starts Uvicorn with
+`--no-proxy-headers`, so Uvicorn does not use `X-Forwarded-For`,
+`X-Forwarded-Proto`, or other proxy headers to rewrite the ASGI client or
+scheme. The login throttle uses only the resulting `request.client.host`
+direct transport peer. Application code deliberately does not read
+`X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `True-Client-IP`, or any
+provider-specific equivalent. Public URLs still come only from
+`LOTKIT_PUBLIC_BASE_URL` or the validated Render fallback, not an incoming
+header. Uvicorn access logs remain enabled. Owner-authentication application
+logs stay generic and never include email, passwords, request bodies, cookies,
+session or CSRF credentials, throttle keys, or forwarding-header contents.
 
-Keep the initial deployment private. Before inviting pilot users, run a live
-spoof test from outside the trusted proxy boundary: changing a supplied
-forwarding header must not change the observed throttle identity. Also confirm
-requests through Render resolve to the real client identity rather than one
-shared proxy IP. A wrong boundary can either let callers rotate spoofed IPs or
-make unrelated users share a bucket. `LOTKIT_FORWARDED_ALLOW_IPS` is a
-separate manual security boundary and must never be `*` in production.
+On Render, the observed peer is conservatively the direct Render proxy peer;
+it is not asserted to be the end user's public IP. Multiple users routed
+through one proxy peer can therefore share a throttle bucket, causing broader
+rate limiting during failures. Conversely, different direct proxy peers can
+produce different buckets. This grouping is the deliberate pilot trade-off:
+callers cannot select new bucket identities by forging forwarding headers.
+Keep the deployment private until a production-safe review confirms that two
+failed logins with different single, repeated, and multi-entry forwarding
+headers update the same bucket for the same direct peer.
 
 The runtime image installs `requirements-runtime.txt`; its application
 versions stay aligned with `requirements.txt` while pytest remains
@@ -262,7 +263,6 @@ docker run --detach \
   --env RENDER=true \
   --env RENDER_EXTERNAL_URL=https://lotkit.invalid \
   --env RENDER_EXTERNAL_HOSTNAME=lotkit.invalid \
-  --env LOTKIT_FORWARDED_ALLOW_IPS=127.0.0.1 \
   --env PORT=8000 \
   --mount "type=bind,src=$LOTKIT_DOCKER_DATA,dst=/var/data" \
   lotkit:phase5b1
