@@ -84,6 +84,7 @@ from api.runs import (
     RunTarget,
     discard_run,
     export_runs_csv,
+    get_resumable_run_detail,
     get_run_detail,
     list_runs,
     mark_run_ready,
@@ -318,11 +319,17 @@ def _prepare_output_run(
             dealership_id,
             requested_run_id,
         )
-        dealership_snapshot = snapshot_dealership(
-            connection,
-            owner_id,
-            dealership_id,
-        )
+        if target.is_new:
+            dealership_snapshot = snapshot_dealership(
+                connection,
+                owner_id,
+                dealership_id,
+            )
+        else:
+            persisted = get_run_detail(connection, owner_id, target.run_id)
+            if persisted is None:
+                raise RunNotFoundError("Run not found.")
+            dealership_snapshot = persisted["dealership_snapshot"]
         return target, dealership_snapshot
     finally:
         connection.close()
@@ -1405,6 +1412,24 @@ def get_saved_run(
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found.")
     return run
+
+
+@router.get("/api/runs/{run_id}/resume")
+def get_resumable_saved_run(
+    run_id: str,
+    owner_id: int = Depends(current_owner_id),
+):
+    connection = connect_db()
+    try:
+        try:
+            return get_resumable_run_detail(connection, owner_id, run_id)
+        except (
+            RunNotFoundError,
+            RunStatusConflictError,
+        ) as exc:
+            return _run_error_response(exc)
+    finally:
+        connection.close()
 
 
 @router.post("/api/runs/{run_id}/delivery", status_code=201)

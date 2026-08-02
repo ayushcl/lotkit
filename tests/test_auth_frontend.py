@@ -56,7 +56,7 @@ def test_frontend_handles_401_and_clears_authenticated_ui() -> None:
     assert "showLogin(" in source
     assert "function clearOwnerInterface()" in source
     assert "ownerApp.hidden = true" in source
-    assert "clearActiveRun();" in source
+    assert "clearActiveRun({forgetStored: false});" in source
 
 
 def test_frontend_has_no_signup_reset_or_remember_me_controls() -> None:
@@ -68,3 +68,53 @@ def test_frontend_has_no_signup_reset_or_remember_me_controls() -> None:
     assert "remember me" not in source
     assert 'sessionstorage.setitem("lotkit_owner' not in source
     assert 'localstorage.setitem("lotkit_owner' not in source
+
+
+def test_in_progress_run_has_resume_action_and_server_validated_restore() -> None:
+    source = _frontend_source()
+
+    assert 'id="resume-run-button"' in source
+    assert ">\n                Resume run\n              </button>" in source
+    assert "async function fetchResumableRun(runId)" in source
+    assert "`/api/runs/${encodeURIComponent(runId)}/resume`" in source
+    assert 'payload.status !== "in_progress"' in source
+    assert 'payload.run_id !== runId' in source
+    assert 'resumeRunButton.hidden = runStatus !== "in_progress";' in source
+    assert 'resumeRunButton.hidden = run.status !== "in_progress";' in source
+    assert "resumeRunButton.addEventListener" in source
+    assert "reopenRunButton.addEventListener" in source
+
+
+def test_resume_restores_form_dealership_artifacts_and_same_run_target() -> None:
+    source = _frontend_source()
+    restore_start = source.index("function restoreRunWorkflow(run)")
+    restore_end = source.index("async function fetchResumableRun", restore_start)
+    restore = source[restore_start:restore_end]
+
+    assert "...runVehicle(run)" in restore
+    assert "price: run.price" in restore
+    assert "exterior_colour: run.exterior_colour" in restore
+    assert "interior_colour: run.interior_colour" in restore
+    assert "vinInput.value = normaliseVin(run.vin);" in restore
+    assert "populateVehicleForm(vehicle);" in restore
+    assert "applyRunDealership(run);" in restore
+    assert "setActiveRun(run.run_id, run.vin, run.status);" in restore
+    assert "restoreRunArtifacts(run);" in restore
+
+    assert "outputs.sticker_pdf" in source
+    assert "outputs.buyers_guide_pdf" in source
+    assert "outputs.photos_zip" in source
+    assert "already packaged for this Run" in source
+    assert "appendActiveRun(requestData);" in source
+
+
+def test_resume_rehydrates_from_server_after_refresh_and_login() -> None:
+    source = _frontend_source()
+
+    assert "await restoreStoredActiveRun();" in source
+    assert "async function restoreStoredActiveRun()" in source
+    assert "const payload = await fetchResumableRun(stored.run_id);" in source
+    assert "restoreRunWorkflow(payload);" in source
+    assert "clearActiveRun({forgetStored: false});" in source
+    assert "sessionStorage.setItem(" in source
+    assert "sessionStorage.removeItem(" in source

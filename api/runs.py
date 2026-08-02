@@ -671,6 +671,23 @@ def get_run_detail(
     return _run_response(row) if row is not None else None
 
 
+def get_resumable_run_detail(
+    connection: sqlite3.Connection,
+    owner_id: int,
+    run_id: str,
+) -> dict[str, Any]:
+    """Return persisted workflow state only for an owned in-progress Run."""
+
+    row = get_run_row(connection, owner_id, run_id)
+    if row is None:
+        raise RunNotFoundError("Run not found.")
+    if row["status"] != "in_progress":
+        raise RunStatusConflictError(
+            "Only an in-progress Run can be resumed."
+        )
+    return _run_response(row)
+
+
 def _normalize_date_filter(value: str, *, end: bool) -> str:
     candidate = value.strip()
     try:

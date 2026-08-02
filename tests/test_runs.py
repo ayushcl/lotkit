@@ -9,9 +9,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api.main
-from api.auth import get_or_create_default_owner
+from api.auth import current_owner_id, get_or_create_default_owner
 from api.db import connect_db, init_db
-from api.main import app
+from api.main import app, create_app
 
 VIN = "1HGCM82633A004352"
 SECOND_VIN = "1FTFW1ET9DFC10312"
@@ -473,6 +473,167 @@ def test_run_id_not_owned_by_current_owner_returns_404(
     assert client.post(f"/api/runs/{other_run_id}/discard").status_code == 404
     assert _run_count(other_owner_id) == 1
     assert _run_count(_owner_id()) == 0
+
+
+def test_resume_detail_is_owner_scoped_and_in_progress_only(
+    client: TestClient,
+) -> None:
+    owner_id = _owner_id()
+    other_owner_id = _insert_user("resume-owner@example.com")
+    in_progress_id = _insert_run(owner_id=owner_id)
+    ready_id = _insert_run(owner_id=owner_id, status="ready")
+    delivered_id = _insert_run(owner_id=owner_id, status="delivered")
+    foreign_id = _insert_run(owner_id=other_owner_id)
+
+    resumed = client.get(f"/api/runs/{in_progress_id}/resume")
+    assert resumed.status_code == 200
+    assert resumed.json()["run_id"] == in_progress_id
+    assert resumed.json()["status"] == "in_progress"
+
+    for run_id in (ready_id, delivered_id):
+        refused = client.get(f"/api/runs/{run_id}/resume")
+        assert refused.status_code == 409
+        assert refused.json() == {
+            "error": "run_status_conflict",
+            "detail": "Only an in-progress Run can be resumed.",
+        }
+
+    for run_id in (foreign_id, str(uuid.uuid4()), "not-a-run-id"):
+        missing = client.get(f"/api/runs/{run_id}/resume")
+        assert missing.status_code == 404
+        assert missing.json()["error"] == "run_not_found"
+
+    assert _run_row(ready_id)["status"] == "ready"
+    assert _run_row(delivered_id)["status"] == "delivered"
+    assert _run_count(owner_id) == 3
+    assert _run_count(other_owner_id) == 1
+
+
+def test_resumed_run_adds_missing_photos_without_duplicate_or_artifact_loss(
+    client: TestClient,
+    mocked_generators,
+    isolated_persistence,
+) -> None:
+    profile = _create_dealership(client)
+    sticker = _create_sticker_run(
+        client,
+        dealership_id=profile["id"],
+    )
+    assert sticker.status_code == 200
+    run_id = sticker.headers["X-LotKit-Run-ID"]
+    buyers = client.post(
+        "/api/buyers-guide",
+        json={
+            "vin": VIN,
+            "make": VEHICLE["make"],
+            "model": VEHICLE["model"],
+            "year": VEHICLE["year"],
+            "version": "as_is",
+            "vehicle": VEHICLE,
+            "price": "8250",
+            "exterior_colour": "Silver",
+            "interior_colour": "Gray",
+            "dealership_id": profile["id"],
+            "run_id": run_id,
+        },
+    )
+    assert buyers.status_code == 200
+    assert buyers.headers["X-LotKit-Run-ID"] == run_id
+    assert _run_count() == 1
+
+    before = _run_row(run_id)
+    before_outputs = json.loads(before["outputs_json"])
+    before_snapshot = json.loads(before["dealership_snapshot_json"])
+    assert set(before_outputs) == {
+        "sticker_pdf",
+        "buyers_guide_pdf",
+        "buyers_guide_version",
+    }
+    assert before_outputs["buyers_guide_version"] == "as_is"
+    original_artifacts = {
+        artifact_type: (
+            api.main.RUNS_ROOT / run_id / before_outputs[artifact_type]
+        ).read_bytes()
+        for artifact_type in ("sticker_pdf", "buyers_guide_pdf")
+    }
+
+    renamed = client.put(
+        f"/api/dealerships/{profile['id']}",
+        data={
+            "nickname": "Renamed after first outputs",
+            "dealership_name": "Changed Motors",
+            "address": "999 Changed Avenue",
+        },
+    )
+    assert renamed.status_code == 200
+
+    replacement_app = create_app(isolated_persistence["settings"])
+    replacement_app.dependency_overrides[current_owner_id] = (
+        lambda: isolated_persistence["owner_id"]
+    )
+    with TestClient(replacement_app) as resumed_client:
+        resumed = resumed_client.get(f"/api/runs/{run_id}/resume")
+        refreshed = resumed_client.get(f"/api/runs/{run_id}/resume")
+        assert resumed.status_code == refreshed.status_code == 200
+        detail = resumed.json()
+        assert detail == refreshed.json()
+        assert detail["run_id"] == run_id
+        assert detail["vin"] == VIN
+        assert detail["vehicle"] == VEHICLE
+        assert detail["dealership_id"] == profile["id"]
+        assert detail["dealership_snapshot"] == before_snapshot
+        assert detail["price"] == "8250"
+        assert detail["exterior_colour"] == "Silver"
+        assert detail["interior_colour"] == "Gray"
+        assert detail["has_sticker"] is True
+        assert detail["has_buyers_guide"] is True
+        assert detail["has_photos"] is False
+        assert detail["outputs"] == before_outputs
+
+        photos = resumed_client.post(
+            "/api/photos/package",
+            data={
+                "vin": detail["vin"],
+                "vehicle": json.dumps(
+                    {
+                        **detail["vehicle"],
+                        "price": detail["price"],
+                        "exterior_colour": detail["exterior_colour"],
+                        "interior_colour": detail["interior_colour"],
+                    }
+                ),
+                "order": json.dumps(["front.jpg", "rear.png"]),
+                "dealership_id": str(detail["dealership_id"]),
+                "run_id": detail["run_id"],
+            },
+            files=[
+                ("photos", ("rear.png", b"rear", "image/png")),
+                ("photos", ("front.jpg", b"front", "image/jpeg")),
+            ],
+        )
+
+    assert photos.status_code == 200
+    assert photos.headers["X-LotKit-Run-ID"] == run_id
+    assert photos.json()["run_id"] == run_id
+    assert _run_count() == 1
+    after = _run_row(run_id)
+    after_outputs = json.loads(after["outputs_json"])
+    assert after["status"] == "in_progress"
+    assert after_outputs["sticker_pdf"] == before_outputs["sticker_pdf"]
+    assert after_outputs["buyers_guide_pdf"] == (
+        before_outputs["buyers_guide_pdf"]
+    )
+    assert after_outputs["buyers_guide_version"] == "as_is"
+    assert after_outputs["photos_zip"]
+    assert json.loads(after["dealership_snapshot_json"]) == before_snapshot
+    assert json.loads(after["photo_order_json"]) == [
+        f"{VIN}_01.jpg",
+        f"{VIN}_02.png",
+    ]
+    for artifact_type, contents in original_artifacts.items():
+        assert (
+            api.main.RUNS_ROOT / run_id / after_outputs[artifact_type]
+        ).read_bytes() == contents
 
 
 def test_dealership_snapshot_survives_profile_edit_and_delete(
